@@ -13,7 +13,7 @@ import { AgentIcon } from "./AgentIconPicker";
 import { formatDateTime } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
-interface CommentWithRunMeta extends IssueComment {
+export interface CommentWithRunMeta extends IssueComment {
   runId?: string | null;
   runAgentId?: string | null;
 }
@@ -52,6 +52,8 @@ interface CommentThreadProps {
   submitLabel?: string;
   hideReopen?: boolean;
   hideHeader?: boolean;
+  /** Content shown when the timeline is empty. Pass null to suppress. Defaults to a text message. */
+  emptyState?: React.ReactNode;
 }
 
 const DRAFT_DEBOUNCE_MS = 800;
@@ -122,21 +124,27 @@ type TimelineItem =
   | { kind: "comment"; id: string; createdAtMs: number; comment: CommentWithRunMeta }
   | { kind: "run"; id: string; createdAtMs: number; run: LinkedRunItem };
 
+const DEFAULT_EMPTY_STATE = (
+  <p className="text-sm text-muted-foreground">No comments or runs yet.</p>
+);
+
 const TimelineList = memo(function TimelineList({
   timeline,
   agentMap,
   companyId,
   projectId,
   highlightCommentId,
+  emptyState = DEFAULT_EMPTY_STATE,
 }: {
   timeline: TimelineItem[];
   agentMap?: Map<string, Agent>;
   companyId?: string | null;
   projectId?: string | null;
   highlightCommentId?: string | null;
+  emptyState?: React.ReactNode;
 }) {
   if (timeline.length === 0) {
-    return null;
+    return emptyState ? <>{emptyState}</> : null;
   }
 
   return (
@@ -284,6 +292,7 @@ export function CommentThread({
   submitLabel,
   hideReopen = false,
   hideHeader = false,
+  emptyState,
 }: CommentThreadProps) {
   const [body, setBody] = useState("");
   const [reopen, setReopen] = useState(true);
@@ -420,6 +429,7 @@ export function CommentThread({
         companyId={companyId}
         projectId={projectId}
         highlightCommentId={highlightCommentId}
+        emptyState={emptyState}
       />
 
       {liveRunSlot}

@@ -30,17 +30,17 @@ import {
   sendMessage,
   renameConversation,
   conversationAgentLabel,
-  isConversationIssue,
   CONVERSATION_PREFIX,
   type SendMessageResult,
 } from "../api/conversations";
 import { useToast } from "../context/ToastContext";
+import { useConversationUnread } from "../hooks/useConversationUnread";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
-import { CommentThread } from "../components/CommentThread";
+import { CommentThread, type CommentWithRunMeta } from "../components/CommentThread";
 import { LiveRunWidget } from "../components/LiveRunWidget";
 import { Identity } from "../components/Identity";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -54,7 +54,7 @@ import {
   Loader2,
   Pencil,
 } from "lucide-react";
-import type { Agent, Issue, IssueComment } from "@paperclipai/shared";
+import type { Agent, Issue } from "@paperclipai/shared";
 
 // ─── Conversation list (left sidebar) ──────────────────────────────────────
 
@@ -164,6 +164,7 @@ function ConversationList({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search conversations..."
+          aria-label="Search conversations"
           className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground/40 focus:border-muted-foreground/50"
         />
       </div>
@@ -377,7 +378,7 @@ interface AgentPickerProps {
 }
 
 function AgentPicker({ agents, loading, onPick, onCancel }: AgentPickerProps) {
-  const active = agents.filter((a) => a.status === "active" || a.status === "idle");
+  const available = agents.filter((a) => a.status !== "terminated");
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-6">
@@ -389,11 +390,11 @@ function AgentPicker({ agents, loading, onPick, onCancel }: AgentPickerProps) {
 
       {loading ? (
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-      ) : active.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No active agents available.</p>
+      ) : available.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No agents available.</p>
       ) : (
         <div className="w-full max-w-xs space-y-1">
-          {active.map((agent) => (
+          {available.map((agent) => (
             <button
               key={agent.id}
               type="button"
@@ -406,6 +407,9 @@ function AgentPicker({ agents, loading, onPick, onCancel }: AgentPickerProps) {
                 <span className="text-sm font-medium truncate block">{agent.name}</span>
                 <span className="text-[11px] text-muted-foreground truncate block">
                   {agent.role ?? "Agent"}
+                  {agent.status === "paused" && (
+                    <span className="ml-1 text-amber-500">(paused)</span>
+                  )}
                 </span>
               </div>
             </button>
@@ -439,6 +443,52 @@ function EmptyConversation({ onNew }: { onNew: () => void }) {
   );
 }
 
+// ─── Waiting state for empty conversations ──────────────────────────────────
+
+function ConversationWaitingState({
+  agentName,
+  conversationCreatedAt,
+}: {
+  agentName: string;
+  conversationCreatedAt: string | Date;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const elapsedSeconds = Math.floor(
+    (now - new Date(conversationCreatedAt).getTime()) / 1000,
+  );
+
+  let message: string;
+  let showSpinner = true;
+
+  if (elapsedSeconds < 60) {
+    message = `Waiting for ${agentName} to respond...`;
+  } else if (elapsedSeconds < 120) {
+    message = `${agentName} is starting up — this may take a moment.`;
+  } else if (elapsedSeconds < 240) {
+    message = `Still waiting — ${agentName} may be handling a cold start.`;
+  } else if (elapsedSeconds < 600) {
+    message = `${agentName} is taking longer than expected. Check the agent's status page for details.`;
+  } else {
+    message = `${agentName} has not responded. There may be an issue — check the agent page for errors.`;
+    showSpinner = false;
+  }
+
+  return (
+    <div className="flex items-center justify-center gap-2 py-4">
+      {showSpinner && (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
+      )}
+      <p className="text-xs text-muted-foreground">{message}</p>
+    </div>
+  );
+}
+
 // ─── Active conversation view (right panel) ────────────────────────────────
 
 interface ConversationViewProps {
@@ -468,13 +518,13 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
     }).catch(() => {});
   }, [issueId, queryClient]);
 
-  const { data: issue } = useQuery({
+  const { data: issue, isLoading: issueLoading } = useQuery({
     queryKey: queryKeys.issues.detail(issueId),
     queryFn: () => issuesApi.get(issueId),
     enabled: !!issueId,
   });
 
-  const { data: comments } = useQuery({
+  const { data: comments, isLoading: commentsLoading } = useQuery({
     queryKey: queryKeys.issues.comments(issueId),
     queryFn: () => issuesApi.listComments(issueId),
     enabled: !!issueId,
@@ -539,16 +589,40 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
     ? agentMap.get(issue.assigneeAgentId)?.name ?? "Agent"
     : "Agent";
 
-  // Build comment-with-run-meta list matching IssueDetail pattern
   const commentsWithRunMeta = useMemo(
-    () =>
-      (comments ?? []).map((c: IssueComment) => ({
-        ...c,
-        runId: (c as unknown as Record<string, unknown>).runId as string | null | undefined,
-        runAgentId: (c as unknown as Record<string, unknown>).runAgentId as string | null | undefined,
-      })),
+    () => (comments ?? []) as CommentWithRunMeta[],
     [comments],
   );
+
+  const visibleComments = useMemo(() => {
+    const isRunActive =
+      activeRun &&
+      (activeRun.status === "running" || activeRun.status === "queued");
+    if (!isRunActive) return commentsWithRunMeta;
+
+    const runStart = new Date(
+      activeRun.startedAt ?? activeRun.createdAt,
+    ).getTime();
+    return commentsWithRunMeta.filter(
+      (c) => new Date(c.createdAt).getTime() < runStart,
+    );
+  }, [commentsWithRunMeta, activeRun]);
+
+  if (issueLoading || commentsLoading) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center gap-3 px-4 h-12 border-b border-border shrink-0">
+          <div className="h-6 w-6 rounded-full bg-muted animate-pulse" />
+          <div className="h-4 w-32 rounded bg-muted animate-pulse" />
+        </div>
+        <div className="flex-1 px-4 py-4 space-y-4">
+          <div className="h-16 rounded bg-muted animate-pulse" />
+          <div className="h-12 rounded bg-muted animate-pulse" />
+          <div className="h-20 rounded bg-muted animate-pulse" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -634,7 +708,7 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
       {/* Chat timeline */}
       <ScrollArea className="flex-1 px-4 py-4">
         <CommentThread
-          comments={commentsWithRunMeta}
+          comments={visibleComments}
           linkedRuns={timelineRuns}
           companyId={companyId}
           issueStatus={issue?.status}
@@ -643,6 +717,14 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
           submitLabel="Send"
           hideReopen
           hideHeader
+          emptyState={
+            issue?.createdAt ? (
+              <ConversationWaitingState
+                agentName={agentName}
+                conversationCreatedAt={issue.createdAt}
+              />
+            ) : null
+          }
           onAdd={async (body) => {
             await addComment.mutateAsync({ body });
           }}
@@ -665,6 +747,7 @@ export function Conversations() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const { pushToast } = useToast();
 
   const [viewMode, setViewMode] = useState<ViewMode>(
     routeIssueId ? "chat" : "list",
@@ -700,21 +783,7 @@ export function Conversations() {
     refetchInterval: 8000,
   });
 
-  const { data: unreadConvos = [] } = useQuery({
-    queryKey: queryKeys.conversations.unread(selectedCompanyId!),
-    queryFn: () =>
-      issuesApi.list(selectedCompanyId!, {
-        touchedByUserId: "me",
-        unreadForUserId: "me",
-        status: "backlog,todo,in_progress,in_review,blocked",
-      }),
-    enabled: !!selectedCompanyId,
-    refetchInterval: 8_000,
-  });
-  const unreadConvoIds = useMemo(
-    () => new Set(unreadConvos.filter(i => isConversationIssue(i)).map(i => i.id)),
-    [unreadConvos],
-  );
+  const { unreadConvoIds } = useConversationUnread(selectedCompanyId);
 
   const { data: companyLiveRuns } = useQuery({
     queryKey: queryKeys.conversations.liveRuns(selectedCompanyId!),
@@ -778,7 +847,12 @@ export function Conversations() {
 
   const handleArchive = useCallback(
     async (issueId: string) => {
-      await issuesApi.update(issueId, { status: "done" });
+      try {
+        await issuesApi.update(issueId, { status: "done" });
+      } catch {
+        pushToast({ title: "Failed to close conversation", tone: "error" });
+        return;
+      }
       queryClient.invalidateQueries({
         queryKey: queryKeys.conversations.list(selectedCompanyId!),
       });

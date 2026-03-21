@@ -24,9 +24,9 @@ export function conversationAgentLabel(issue: Issue): string {
 }
 
 /**
- * List all open conversations for a company.
- * Fetches the full issue list and filters client-side by title prefix.
- * Excludes cancelled/done conversations unless explicitly requested.
+ * List conversations for a company, identified by their title prefix and
+ * filtered client-side. By default only returns active conversations;
+ * pass `includeClosed: true` to include archived (done/cancelled) ones.
  */
 export async function listConversations(
   companyId: string,
