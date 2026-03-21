@@ -17,7 +17,7 @@
  * - Close/archive conversations with collapsible history section
  * - Conversations hidden from Issues page, Inbox, and Dashboard
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
@@ -32,7 +32,9 @@ import {
   conversationAgentLabel,
   isConversationIssue,
   CONVERSATION_PREFIX,
+  type SendMessageResult,
 } from "../api/conversations";
+import { useToast } from "../context/ToastContext";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -88,6 +90,7 @@ function ConversationList({
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const renameCommitted = useRef(false);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [serverResults, setServerResults] = useState<Set<string>>(new Set());
@@ -118,7 +121,8 @@ function ConversationList({
   }, [debouncedSearch, conversations, archivedConversations]);
 
   const filteredConversations = useMemo(() => {
-    if (!debouncedSearch.trim()) return conversations;
+    // Bypass filter immediately when input is cleared (don't wait for debounce)
+    if (!search.trim() || !debouncedSearch.trim()) return conversations;
     const q = debouncedSearch.toLowerCase();
     return conversations.filter((issue) => {
       // Client-side match on title/name
@@ -129,10 +133,10 @@ function ConversationList({
       // Server-side match on comment content
       return serverResults.has(issue.id);
     });
-  }, [conversations, debouncedSearch, agentMap, serverResults]);
+  }, [conversations, search, debouncedSearch, agentMap, serverResults]);
 
   const filteredArchived = useMemo(() => {
-    if (!debouncedSearch.trim()) return archivedConversations;
+    if (!search.trim() || !debouncedSearch.trim()) return archivedConversations;
     const q = debouncedSearch.toLowerCase();
     return archivedConversations.filter((issue) => {
       const title = issue.title?.toLowerCase() ?? "";
@@ -141,7 +145,7 @@ function ConversationList({
       if (title.includes(q) || name.includes(q)) return true;
       return serverResults.has(issue.id);
     });
-  }, [archivedConversations, debouncedSearch, agentMap, serverResults]);
+  }, [archivedConversations, search, debouncedSearch, agentMap, serverResults]);
 
   return (
     <div className="flex flex-col h-full border-r border-border bg-background overflow-hidden">
@@ -226,7 +230,8 @@ function ConversationList({
                         e.stopPropagation();
                         if (e.key === "Enter") {
                           e.preventDefault();
-                          if (editDraft.trim()) {
+                          if (!renameCommitted.current && editDraft.trim()) {
+                            renameCommitted.current = true;
                             const agentLabel = agent?.name ?? label;
                             await renameConversation(issue.id, agentLabel, editDraft.trim());
                             onSelect(issue.id);
@@ -236,7 +241,8 @@ function ConversationList({
                         if (e.key === "Escape") setEditingId(null);
                       }}
                       onBlur={async () => {
-                        if (editDraft.trim()) {
+                        if (!renameCommitted.current && editDraft.trim()) {
+                          renameCommitted.current = true;
                           const agentLabel = agent?.name ?? label;
                           await renameConversation(issue.id, agentLabel, editDraft.trim());
                           onSelect(issue.id);
@@ -264,6 +270,7 @@ function ConversationList({
                             tabIndex={0}
                             onClick={(e) => {
                               e.stopPropagation();
+                              renameCommitted.current = false;
                               const currentTopic = issue.title?.includes(" — ")
                                 ? issue.title.split(" — ").slice(1).join(" — ")
                                 : "";
@@ -273,6 +280,7 @@ function ConversationList({
                             onKeyDown={(e) => {
                               if (e.key === "Enter" || e.key === " ") {
                                 e.stopPropagation();
+                                renameCommitted.current = false;
                                 const currentTopic = issue.title?.includes(" — ")
                                   ? issue.title.split(" — ").slice(1).join(" — ")
                                   : "";
@@ -389,7 +397,8 @@ function AgentPicker({ agents, loading, onPick, onCancel }: AgentPickerProps) {
             <button
               key={agent.id}
               type="button"
-              className="flex items-center gap-3 w-full px-3 py-2.5 rounded-md border border-border hover:bg-accent/50 transition-colors text-left"
+              disabled={loading}
+              className="flex items-center gap-3 w-full px-3 py-2.5 rounded-md border border-border hover:bg-accent/50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={() => onPick(agent.id, agent.name)}
             >
               <Identity name={agent.name} size="sm" />
@@ -441,6 +450,7 @@ interface ConversationViewProps {
 
 function ConversationView({ issueId, companyId, agents, onClose }: ConversationViewProps) {
   const queryClient = useQueryClient();
+  const { pushToast } = useToast();
 
   const agentMap = useMemo(
     () => new Map(agents.map((a) => [a.id, a])),
@@ -449,11 +459,12 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
 
   const [editingTopic, setEditingTopic] = useState(false);
   const [topicDraft, setTopicDraft] = useState("");
+  const headerRenameCommitted = useRef(false);
 
   // Mark conversation as read when viewing it
   useEffect(() => {
     issuesApi.markRead(issueId).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["conversations-unread"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.conversations.unread(companyId) });
     }).catch(() => {});
   }, [issueId, queryClient]);
 
@@ -498,22 +509,29 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
   }, [linkedRuns, liveRuns, activeRun]);
 
   const addComment = useMutation({
-    mutationFn: async ({ body }: { body: string }) => {
+    mutationFn: async ({ body }: { body: string }): Promise<SendMessageResult> => {
       if (!issue?.assigneeAgentId) {
         await issuesApi.addComment(issueId, body);
-        return;
+        return { ok: true };
       }
-      await sendMessage(issueId, issue.assigneeAgentId, body, companyId);
+      return sendMessage(issueId, issue.assigneeAgentId, body, companyId);
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
       queryClient.invalidateQueries({
         queryKey: queryKeys.issues.liveRuns(issueId),
       });
       queryClient.invalidateQueries({
-        queryKey: ["conversations", companyId],
+        queryKey: queryKeys.conversations.list(companyId),
       });
+      if (result && !result.ok) {
+        pushToast({
+          title: "Message sent, but agent may not respond",
+          body: "The agent could not be woken up. It will respond on its next heartbeat.",
+          tone: "warn",
+        });
+      }
     },
   });
 
@@ -547,20 +565,22 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
               onKeyDown={async (e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  if (topicDraft.trim()) {
+                  if (!headerRenameCommitted.current && topicDraft.trim()) {
+                    headerRenameCommitted.current = true;
                     await renameConversation(issueId, agentName, topicDraft.trim());
                     queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
-                    queryClient.invalidateQueries({ queryKey: ["conversations", companyId] });
+                    queryClient.invalidateQueries({ queryKey: queryKeys.conversations.list(companyId) });
                   }
                   setEditingTopic(false);
                 }
                 if (e.key === "Escape") setEditingTopic(false);
               }}
               onBlur={async () => {
-                if (topicDraft.trim()) {
+                if (!headerRenameCommitted.current && topicDraft.trim()) {
+                  headerRenameCommitted.current = true;
                   await renameConversation(issueId, agentName, topicDraft.trim());
                   queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
-                  queryClient.invalidateQueries({ queryKey: ["conversations", companyId] });
+                  queryClient.invalidateQueries({ queryKey: queryKeys.conversations.list(companyId) });
                 }
                 setEditingTopic(false);
               }}
@@ -570,6 +590,7 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
             <div
               className="flex items-center gap-2 cursor-pointer group"
               onClick={() => {
+                headerRenameCommitted.current = false;
                 const currentTopic = issue?.title?.includes(" — ")
                   ? issue.title.split(" — ").slice(1).join(" — ")
                   : "";
@@ -673,14 +694,14 @@ export function Conversations() {
   });
 
   const { data: conversations = [] } = useQuery({
-    queryKey: ["conversations", selectedCompanyId],
+    queryKey: queryKeys.conversations.list(selectedCompanyId!),
     queryFn: () => listConversations(selectedCompanyId!, { includeClosed: true }),
     enabled: !!selectedCompanyId,
     refetchInterval: 8000,
   });
 
   const { data: unreadConvos = [] } = useQuery({
-    queryKey: ["conversations-unread", selectedCompanyId],
+    queryKey: queryKeys.conversations.unread(selectedCompanyId!),
     queryFn: () =>
       issuesApi.list(selectedCompanyId!, {
         touchedByUserId: "me",
@@ -691,12 +712,12 @@ export function Conversations() {
     refetchInterval: 8_000,
   });
   const unreadConvoIds = useMemo(
-    () => new Set(unreadConvos.filter(i => i.title?.startsWith("Conversation: ")).map(i => i.id)),
+    () => new Set(unreadConvos.filter(i => isConversationIssue(i)).map(i => i.id)),
     [unreadConvos],
   );
 
   const { data: companyLiveRuns } = useQuery({
-    queryKey: ["conversations-live-runs", selectedCompanyId],
+    queryKey: queryKeys.conversations.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
     refetchInterval: 3_000,
@@ -745,7 +766,7 @@ export function Conversations() {
           agentName,
         );
         queryClient.invalidateQueries({
-          queryKey: ["conversations", selectedCompanyId],
+          queryKey: queryKeys.conversations.list(selectedCompanyId!),
         });
         handleSelect(issue.id);
       } finally {
@@ -759,7 +780,7 @@ export function Conversations() {
     async (issueId: string) => {
       await issuesApi.update(issueId, { status: "done" });
       queryClient.invalidateQueries({
-        queryKey: ["conversations", selectedCompanyId],
+        queryKey: queryKeys.conversations.list(selectedCompanyId!),
       });
       if (activeIssueId === issueId) {
         setActiveIssueId(null);

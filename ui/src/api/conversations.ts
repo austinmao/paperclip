@@ -80,40 +80,71 @@ export async function startConversation(
   });
 }
 
+/** Deduplicates concurrent calls for the same agent to avoid creating duplicates. */
+const ensureInFlight = new Map<string, Promise<Issue>>();
+
 /**
- * Find or create a conversation with the given agent, then return its issue ID.
+ * Find or create a conversation with the given agent, then return its issue.
+ * Concurrent calls for the same agent share a single in-flight Promise.
  */
-export async function ensureConversation(
+export function ensureConversation(
   companyId: string,
   agentId: string,
   agentName: string,
 ): Promise<Issue> {
-  const existing = await findConversation(companyId, agentId);
-  if (existing) return existing;
-  return startConversation(companyId, agentId, agentName);
+  const key = `${companyId}:${agentId}`;
+  const inflight = ensureInFlight.get(key);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    const existing = await findConversation(companyId, agentId);
+    if (existing) return existing;
+    return startConversation(companyId, agentId, agentName);
+  })();
+
+  ensureInFlight.set(key, promise);
+  promise.finally(() => ensureInFlight.delete(key));
+
+  return promise;
 }
+
+/** Result of a sendMessage call — allows callers to detect partial failures. */
+export type SendMessageResult =
+  | { ok: true }
+  | { ok: false; wakeupError: unknown };
 
 /**
  * Send a message in a conversation. Posts a comment and immediately wakes the
  * assigned agent so it can respond.
+ *
+ * Returns a result object so callers can detect when the comment was posted
+ * successfully but the agent wakeup failed (network blip, rate limit, etc.).
  */
 export async function sendMessage(
   issueId: string,
   agentId: string,
   body: string,
   companyId?: string,
-): Promise<void> {
+): Promise<SendMessageResult> {
+  // Comment is the primary action — let it throw on failure.
   await issuesApi.addComment(issueId, body, true);
-  await agentsApi.wakeup(
-    agentId,
-    {
-      source: "on_demand",
-      triggerDetail: "manual",
-      reason: "conversation_reply",
-      payload: { issueId },
-    },
-    companyId,
-  );
+
+  // Wakeup is best-effort — capture failures so the caller can surface them.
+  try {
+    await agentsApi.wakeup(
+      agentId,
+      {
+        source: "on_demand",
+        triggerDetail: "manual",
+        reason: "conversation_reply",
+        payload: { issueId },
+      },
+      companyId,
+    );
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, wakeupError: err };
+  }
 }
 
 /**

@@ -531,6 +531,7 @@ export function AgentDetail() {
   const navigate = useNavigate();
   const [actionError, setActionError] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [startingChat, setStartingChat] = useState(false);
   const activeView = urlRunId ? "runs" as AgentDetailView : parseAgentDetailView(urlTab ?? null);
   const needsDashboardData = activeView === "dashboard";
   const needsRunData = activeView === "runs" || Boolean(urlRunId);
@@ -830,10 +831,16 @@ export function AgentDetail() {
           <Button
             variant="outline"
             size="sm"
+            disabled={startingChat}
             onClick={async () => {
-              if (!selectedCompanyId) return;
-              const issue = await ensureConversation(selectedCompanyId, agent.id, agent.name);
-              navigate(`/conversations/${issue.id}`);
+              if (!selectedCompanyId || startingChat) return;
+              setStartingChat(true);
+              try {
+                const issue = await ensureConversation(selectedCompanyId, agent.id, agent.name);
+                navigate(`/conversations/${issue.id}`);
+              } finally {
+                setStartingChat(false);
+              }
             }}
           >
             <MessageSquare className="h-3.5 w-3.5 sm:mr-1" />
