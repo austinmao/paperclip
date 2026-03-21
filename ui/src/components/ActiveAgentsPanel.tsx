@@ -28,13 +28,12 @@ export function ActiveAgentsPanel({ companyId }: ActiveAgentsPanelProps) {
     queryFn: () => heartbeatsApi.liveRunsForCompany(companyId, MIN_DASHBOARD_RUNS),
   });
 
-  const runs = liveRuns ?? [];
+  const allRuns = liveRuns ?? [];
   const { data: issues } = useQuery({
     queryKey: queryKeys.issues.list(companyId),
     queryFn: () => issuesApi.list(companyId),
-    enabled: runs.length > 0,
+    enabled: allRuns.length > 0,
   });
-
   const issueById = useMemo(() => {
     const map = new Map<string, Issue>();
     for (const issue of issues ?? []) {
@@ -42,6 +41,14 @@ export function ActiveAgentsPanel({ companyId }: ActiveAgentsPanelProps) {
     }
     return map;
   }, [issues]);
+  const runs = useMemo(
+    () => allRuns.filter((run) => {
+      if (!run.issueId) return true;
+      const issue = issueById.get(run.issueId);
+      return !issue?.title?.startsWith("Conversation: ");
+    }),
+    [allRuns, issueById],
+  );
 
   const { transcriptByRun, hasOutputForRun } = useLiveRunTranscripts({
     runs,

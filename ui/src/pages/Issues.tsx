@@ -105,7 +105,7 @@ export function Issues() {
 
   return (
     <IssuesList
-      issues={issues ?? []}
+      issues={(issues ?? []).filter(i => !i.title?.startsWith("Conversation: "))}
       isLoading={isLoading}
       error={error as Error | null}
       agents={agents}

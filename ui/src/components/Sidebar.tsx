@@ -11,7 +11,9 @@ import {
   Boxes,
   Repeat,
   Settings,
+  MessageSquare,
 } from "lucide-react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
 import { SidebarNavItem } from "./SidebarNavItem";
@@ -20,6 +22,7 @@ import { SidebarAgents } from "./SidebarAgents";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { heartbeatsApi } from "../api/heartbeats";
+import { issuesApi } from "../api/issues";
 import { queryKeys } from "../lib/queryKeys";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +39,23 @@ export function Sidebar() {
     refetchInterval: 10_000,
   });
   const liveRunCount = liveRuns?.length ?? 0;
+  const { data: touchedIssues } = useQuery({
+    queryKey: queryKeys.issues.listUnreadTouchedByMe(selectedCompanyId!),
+    queryFn: () =>
+      issuesApi.list(selectedCompanyId!, {
+        touchedByUserId: "me",
+        unreadForUserId: "me",
+        status: "backlog,todo,in_progress,in_review,blocked",
+      }),
+    enabled: !!selectedCompanyId,
+    refetchInterval: 8_000,
+  });
+  const unreadConvoCount = useMemo(() => {
+    if (!touchedIssues) return 0;
+    return touchedIssues.filter(
+      (i) => i.title?.startsWith("Conversation: "),
+    ).length;
+  }, [touchedIssues]);
 
   function openSearch() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
@@ -80,6 +100,7 @@ export function Sidebar() {
             <span className="truncate">New Issue</span>
           </button>
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/conversations" label="Conversations" icon={MessageSquare} badge={unreadConvoCount || undefined} />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"

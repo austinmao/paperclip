@@ -377,7 +377,10 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
 
-  const touchedIssues = useMemo(() => getRecentTouchedIssues(touchedIssuesRaw), [touchedIssuesRaw]);
+  const touchedIssues = useMemo(
+    () => getRecentTouchedIssues(touchedIssuesRaw).filter(i => !i.title?.startsWith("Conversation: ")),
+    [touchedIssuesRaw],
+  );
   const unreadTouchedIssues = useMemo(
     () => touchedIssues.filter((issue) => issue.isUnreadForMe),
     [touchedIssues],

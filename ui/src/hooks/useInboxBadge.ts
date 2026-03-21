@@ -83,7 +83,9 @@ export function useInboxBadge(companyId: string | null | undefined) {
   });
 
   const unreadIssues = useMemo(
-    () => getUnreadTouchedIssues(getRecentTouchedIssues(touchedIssues)),
+    () => getUnreadTouchedIssues(getRecentTouchedIssues(touchedIssues)).filter(
+      i => !i.title?.startsWith("Conversation: ")
+    ),
     [touchedIssues],
   );
 

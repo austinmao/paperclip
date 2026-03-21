@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent } from "re
 import { Link, useLocation } from "react-router-dom";
 import type { IssueComment, Agent } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { Identity } from "./Identity";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
@@ -48,6 +49,9 @@ interface CommentThreadProps {
   currentAssigneeValue?: string;
   suggestedAssigneeValue?: string;
   mentions?: MentionOption[];
+  submitLabel?: string;
+  hideReopen?: boolean;
+  hideHeader?: boolean;
 }
 
 const DRAFT_DEBOUNCE_MS = 800;
@@ -132,7 +136,7 @@ const TimelineList = memo(function TimelineList({
   highlightCommentId?: string | null;
 }) {
   if (timeline.length === 0) {
-    return <p className="text-sm text-muted-foreground">No comments or runs yet.</p>;
+    return null;
   }
 
   return (
@@ -155,12 +159,19 @@ const TimelineList = memo(function TimelineList({
               </div>
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-muted-foreground">Run</span>
-                <Link
-                  to={`/agents/${run.agentId}/runs/${run.runId}`}
-                  className="inline-flex items-center rounded-md border border-border bg-accent/40 px-2 py-1 font-mono text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
-                >
-                  {run.runId.slice(0, 8)}
-                </Link>
+                <Tooltip delayDuration={300}>
+                  <TooltipTrigger asChild>
+                    <Link
+                      to={`/agents/${run.agentId}/runs/${run.runId}`}
+                      className="inline-flex items-center rounded-md border border-border bg-accent/40 px-2 py-1 font-mono text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
+                    >
+                      {run.runId.slice(0, 8)}
+                    </Link>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="text-xs">
+                    View full run transcript
+                  </TooltipContent>
+                </Tooltip>
                 <StatusBadge status={run.status} />
               </div>
             </div>
@@ -270,6 +281,9 @@ export function CommentThread({
   currentAssigneeValue = "",
   suggestedAssigneeValue,
   mentions: providedMentions,
+  submitLabel,
+  hideReopen = false,
+  hideHeader = false,
 }: CommentThreadProps) {
   const [body, setBody] = useState("");
   const [reopen, setReopen] = useState(true);
@@ -398,7 +412,7 @@ export function CommentThread({
 
   return (
     <div className="space-y-4">
-      <h3 className="text-sm font-semibold">Comments &amp; Runs ({timeline.length})</h3>
+      {!hideHeader && <h3 className="text-sm font-semibold">Comments &amp; Runs ({timeline.length})</h3>}
 
       <TimelineList
         timeline={timeline}
@@ -415,7 +429,7 @@ export function CommentThread({
           ref={editorRef}
           value={body}
           onChange={setBody}
-          placeholder="Leave a comment..."
+          placeholder="Type your message here..."
           mentions={mentions}
           onSubmit={handleSubmit}
           imageUploadHandler={imageUploadHandler}
@@ -442,15 +456,17 @@ export function CommentThread({
               </Button>
             </div>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={reopen}
-              onChange={(e) => setReopen(e.target.checked)}
-              className="rounded border-border"
-            />
-            Re-open
-          </label>
+          {!hideReopen && (
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={reopen}
+                onChange={(e) => setReopen(e.target.checked)}
+                className="rounded border-border"
+              />
+              Re-open
+            </label>
+          )}
           {enableReassign && reassignOptions.length > 0 && (
             <InlineEntitySelector
               value={reassignTarget}
@@ -489,9 +505,16 @@ export function CommentThread({
               }}
             />
           )}
-          <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
-            {submitting ? "Posting..." : "Comment"}
-          </Button>
+          <Tooltip delayDuration={300}>
+            <TooltipTrigger asChild>
+              <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
+                {submitting ? "Posting..." : (submitLabel ?? "Comment")}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              Ctrl+Enter to send
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
