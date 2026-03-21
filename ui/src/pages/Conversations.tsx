@@ -86,6 +86,8 @@ function ConversationList({
     [agents],
   );
 
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [serverResults, setServerResults] = useState<Set<string>>(new Set());
@@ -213,11 +215,43 @@ function ConversationList({
                   <span className="h-2 w-2 rounded-full bg-white/70 shrink-0" />
                 ) : null}
                 <div className="flex-1 min-w-0">
-                  <span className="text-[13px] font-medium truncate block">
-                    {issue.title?.includes(" — ")
-                      ? issue.title.split(" — ").slice(1).join(" — ")
-                      : label || "Conversation"}
-                  </span>
+                  {editingId === issue.id ? (
+                    <input
+                      autoFocus
+                      className="text-[13px] font-medium bg-transparent border-b border-muted-foreground/30 outline-none w-full"
+                      value={editDraft}
+                      onChange={(e) => setEditDraft(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={async (e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          if (editDraft.trim()) {
+                            const agentLabel = agent?.name ?? label;
+                            await renameConversation(issue.id, agentLabel, editDraft.trim());
+                            onSelect(issue.id);
+                          }
+                          setEditingId(null);
+                        }
+                        if (e.key === "Escape") setEditingId(null);
+                      }}
+                      onBlur={async () => {
+                        if (editDraft.trim()) {
+                          const agentLabel = agent?.name ?? label;
+                          await renameConversation(issue.id, agentLabel, editDraft.trim());
+                          onSelect(issue.id);
+                        }
+                        setEditingId(null);
+                      }}
+                      placeholder="Name this conversation..."
+                    />
+                  ) : (
+                    <span className="text-[13px] font-medium truncate block">
+                      {issue.title?.includes(" — ")
+                        ? issue.title.split(" — ").slice(1).join(" — ")
+                        : label || "Conversation"}
+                    </span>
+                  )}
                   <div className="flex items-center gap-1 mt-0.5">
                     <span className="text-[10px] text-muted-foreground flex-1">
                       {timeAgo(issue.updatedAt)}
@@ -233,12 +267,17 @@ function ConversationList({
                               const currentTopic = issue.title?.includes(" — ")
                                 ? issue.title.split(" — ").slice(1).join(" — ")
                                 : "";
-                              const newTitle = prompt("Rename conversation:", currentTopic);
-                              if (newTitle !== null && newTitle.trim()) {
-                                const agentLabel = agent?.name ?? label;
-                                renameConversation(issue.id, agentLabel, newTitle.trim()).then(() => {
-                                  onSelect(issue.id);
-                                });
+                              setEditDraft(currentTopic);
+                              setEditingId(issue.id);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.stopPropagation();
+                                const currentTopic = issue.title?.includes(" — ")
+                                  ? issue.title.split(" — ").slice(1).join(" — ")
+                                  : "";
+                                setEditDraft(currentTopic);
+                                setEditingId(issue.id);
                               }
                             }}
                             className="text-muted-foreground hover:text-foreground cursor-pointer"
@@ -263,21 +302,6 @@ function ConversationList({
                               if (e.key === "Enter" || e.key === " ") {
                                 e.stopPropagation();
                                 onArchive(issue.id);
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.stopPropagation();
-                                const currentTopic = issue.title?.includes(" — ")
-                                  ? issue.title.split(" — ").slice(1).join(" — ")
-                                  : "";
-                                const newTitle = prompt("Rename conversation:", currentTopic);
-                                if (newTitle !== null && newTitle.trim()) {
-                                  const agentLabel = agent?.name ?? label;
-                                  renameConversation(issue.id, agentLabel, newTitle.trim()).then(() => {
-                                    onSelect(issue.id);
-                                  });
-                                }
                               }
                             }}
                             className="text-muted-foreground hover:text-foreground cursor-pointer"
