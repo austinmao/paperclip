@@ -47,6 +47,7 @@ import { createPluginHostServiceCleanup } from "./services/plugin-host-service-c
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
+import { bridgeRoutes } from "./routes/bridge.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 
@@ -126,6 +127,9 @@ export async function createApp(
     app.all("/api/auth/*authPath", opts.betterAuthHandler);
   }
   app.use(llmRoutes(db));
+
+  // Bridge routes — Lumina platform SSO handoff (own JWT auth, no board actor)
+  app.use("/api/v1/bridge", bridgeRoutes(db));
 
   // Mount API routes
   const api = Router();
