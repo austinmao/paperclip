@@ -204,7 +204,77 @@ function generateId(): string {
 export function bridgeRoutes(db: Db) {
   const router = Router();
 
-  // All bridge routes require bridge JWT auth
+  // ── GET /sso-landing ──────────────────────────────────────────────────
+  // Browser redirect target for cross-domain SSO. Registered BEFORE the
+  // bridgeAuth middleware because this is a browser GET (no Bearer token).
+  // The handoff JWT itself is verified inline for authentication.
+  router.get("/sso-landing", async (req: Request, res: Response) => {
+    const handoff = req.query.handoff;
+    if (typeof handoff !== "string" || !handoff) {
+      res.status(400).json({ error: "Missing handoff parameter" });
+      return;
+    }
+
+    // Verify the handoff JWT (same verification as bridge auth)
+    const claims = verifyBridgeJwt(handoff);
+    if (!claims) {
+      res.status(401).json({ error: "Invalid or expired handoff token" });
+      return;
+    }
+
+    // Reject replayed tokens
+    if (!checkAndRecordJti(claims.jti, claims.exp)) {
+      res.status(401).json({ error: "Token already used" });
+      return;
+    }
+
+    // Extract session token from JWT claims
+    const parts = handoff.split(".");
+    if (parts.length !== 3) {
+      res.status(400).json({ error: "Malformed handoff token" });
+      return;
+    }
+
+    let sessionToken: string | undefined;
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      sessionToken = typeof payload.session_token === "string" ? payload.session_token : undefined;
+    } catch {
+      res.status(400).json({ error: "Malformed handoff token" });
+      return;
+    }
+
+    if (!sessionToken) {
+      res.status(400).json({ error: "Missing session token in handoff" });
+      return;
+    }
+
+    // Verify the session exists in the database
+    const session = await db
+      .select({ id: authSessions.id })
+      .from(authSessions)
+      .where(eq(authSessions.token, sessionToken))
+      .limit(1);
+
+    if (session.length === 0) {
+      res.status(400).json({ error: "Invalid session" });
+      return;
+    }
+
+    // Set the Better Auth session cookie on this domain
+    const isSecure = req.protocol === "https" || req.headers["x-forwarded-proto"] === "https";
+    res.cookie("better-auth.session_token", sessionToken, {
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days (matches session TTL)
+    });
+
+    res.redirect("/");
+  });
+
+  // All remaining bridge routes require bridge JWT auth
   router.use(bridgeAuth);
 
   // ── POST /upsert-user ───────────────────────────────────────────────────
@@ -473,79 +543,6 @@ export function bridgeRoutes(db: Db) {
     }
 
     res.json({ company_id: companyId, ok: true });
-  });
-
-  // ── GET /sso-landing ──────────────────────────────────────────────────
-  // Browser redirect target for cross-domain SSO. The platform redirects
-  // the user here after consumeHandoff with a signed JWT containing the
-  // session token. This endpoint verifies the JWT, sets the session
-  // cookie on the Paperclip domain, and redirects to the dashboard.
-  router.get("/sso-landing", async (req: Request, res: Response) => {
-    const handoff = req.query.handoff;
-    if (typeof handoff !== "string" || !handoff) {
-      res.status(400).json({ error: "Missing handoff parameter" });
-      return;
-    }
-
-    // Verify the handoff JWT (same verification as bridge auth)
-    const claims = verifyBridgeJwt(handoff);
-    if (!claims) {
-      res.status(401).json({ error: "Invalid or expired handoff token" });
-      return;
-    }
-
-    // Reject replayed tokens
-    if (!checkAndRecordJti(claims.jti, claims.exp)) {
-      res.status(401).json({ error: "Token already used" });
-      return;
-    }
-
-    // Extract session token from JWT claims
-    // The verifyBridgeJwt only returns standard claims, so we need to
-    // re-parse to get the session_token field
-    const parts = handoff.split(".");
-    if (parts.length !== 3) {
-      res.status(400).json({ error: "Malformed handoff token" });
-      return;
-    }
-
-    let sessionToken: string | undefined;
-    try {
-      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-      sessionToken = typeof payload.session_token === "string" ? payload.session_token : undefined;
-    } catch {
-      res.status(400).json({ error: "Malformed handoff token" });
-      return;
-    }
-
-    if (!sessionToken) {
-      res.status(400).json({ error: "Missing session token in handoff" });
-      return;
-    }
-
-    // Verify the session exists in the database
-    const session = await db
-      .select({ id: authSessions.id })
-      .from(authSessions)
-      .where(eq(authSessions.token, sessionToken))
-      .limit(1);
-
-    if (session.length === 0) {
-      res.status(400).json({ error: "Invalid session" });
-      return;
-    }
-
-    // Set the Better Auth session cookie on this domain
-    const isSecure = req.protocol === "https" || req.headers["x-forwarded-proto"] === "https";
-    res.cookie("better-auth.session_token", sessionToken, {
-      httpOnly: true,
-      secure: isSecure,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days (matches session TTL)
-    });
-
-    res.redirect("/");
   });
 
   return router;
