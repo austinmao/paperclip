@@ -36,6 +36,7 @@ export interface BridgeJwtClaims {
 
 const JWT_ALGORITHM = "HS256";
 const EXPECTED_ISSUER = "lumina-platform-bridge";
+const MAX_IAT_SKEW_SECONDS = 300; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -69,7 +70,13 @@ function parseJson(value: string): Record<string, unknown> | null {
 function safeCompare(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
-  if (left.length !== right.length) return false;
+  // Constant-time comparison regardless of length mismatch:
+  // compare expected against itself when lengths differ to avoid
+  // leaking length information via timing.
+  if (left.length !== right.length) {
+    timingSafeEqual(left, left);
+    return false;
+  }
   return timingSafeEqual(left, right);
 }
 
@@ -116,9 +123,10 @@ export function verifyBridgeJwt(token: string): BridgeJwtClaims | null {
   // Verify issuer
   if (iss !== EXPECTED_ISSUER) return null;
 
-  // Verify expiry
+  // Verify timing
   const now = Math.floor(Date.now() / 1000);
   if (exp < now) return null;
+  if (Math.abs(now - iat) > MAX_IAT_SKEW_SECONDS) return null;
 
   return { company_id: companyId, iss, jti, iat, exp };
 }
