@@ -10,13 +10,15 @@
 //   POST /revoke-access       — suspend membership + delete sessions
 //
 // All endpoints are authenticated with a short-lived Bridge JWT signed with
-// PAPERCLIP_AGENT_JWT_SECRET (shared between Lumina and this Paperclip instance).
+// PAPERCLIP_AGENT_JWT_SECRET.
 //
 // Security:
-//   - All inputs validated before DB operations
+//   - All inputs validated before DB operations (length, format, role allowlist)
 //   - Parameterized queries only (Drizzle ORM)
 //   - No user-supplied values in error messages
 //   - Bridge JWT verified on every request (60-second TTL, issuer check)
+//   - JTI replay prevention (in-process nonce set with TTL eviction)
+//   - Session revocation scoped to company (no cross-tenant side effects)
 // ---------------------------------------------------------------------------
 
 import { Router, type Request, type Response, type NextFunction } from "express";
@@ -24,6 +26,14 @@ import { eq, and } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers, authSessions, companyMemberships } from "@paperclipai/db";
 import { verifyBridgeJwt } from "../bridge-auth-jwt.js";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const ALLOWED_ROLES = new Set(["owner", "admin", "member"]);
+const MAX_STRING_LENGTH = 255;
+const MAX_ID_LENGTH = 64;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,20 +61,39 @@ interface RevokeAccessBody {
 }
 
 // ---------------------------------------------------------------------------
+// JTI replay prevention (CRIT-1 fix)
+// ---------------------------------------------------------------------------
+
+const usedJtis = new Map<string, number>();
+
+function checkAndRecordJti(jti: string, exp: number): boolean {
+  const now = Math.floor(Date.now() / 1000);
+
+  // Evict expired entries (keep map bounded)
+  for (const [k, e] of usedJtis) {
+    if (e < now) usedJtis.delete(k);
+  }
+
+  if (usedJtis.has(jti)) return false;
+  usedJtis.set(jti, exp);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+function isBoundedString(value: unknown, maxLen: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLen;
 }
 
 function validateUpsertUser(body: unknown): UpsertUserBody | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   if (
-    !isNonEmptyString(b.platform_user_id) ||
-    !isNonEmptyString(b.email) ||
-    !isNonEmptyString(b.name)
+    !isBoundedString(b.platform_user_id, MAX_ID_LENGTH) ||
+    !isBoundedString(b.email, MAX_STRING_LENGTH) ||
+    !isBoundedString(b.name, MAX_STRING_LENGTH)
   ) {
     return null;
   }
@@ -79,30 +108,37 @@ function validateSyncMembership(body: unknown): SyncMembershipBody | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   if (
-    !isNonEmptyString(b.company_id) ||
-    !isNonEmptyString(b.user_id) ||
-    !isNonEmptyString(b.role)
+    !isBoundedString(b.company_id, MAX_ID_LENGTH) ||
+    !isBoundedString(b.user_id, MAX_ID_LENGTH) ||
+    !isBoundedString(b.role, MAX_ID_LENGTH)
   ) {
+    return null;
+  }
+  // CRIT-3 fix: enforce role allowlist
+  if (!ALLOWED_ROLES.has(b.role as string)) {
     return null;
   }
   return {
     company_id: b.company_id,
     user_id: b.user_id,
-    role: b.role,
+    role: b.role as string,
   };
 }
 
 function validateCreateSession(body: unknown): CreateSessionBody | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
-  if (!isNonEmptyString(b.user_id)) return null;
+  if (!isBoundedString(b.user_id, MAX_ID_LENGTH)) return null;
   return { user_id: b.user_id };
 }
 
 function validateRevokeAccess(body: unknown): RevokeAccessBody | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
-  if (!isNonEmptyString(b.user_id) || !isNonEmptyString(b.company_id)) {
+  if (
+    !isBoundedString(b.user_id, MAX_ID_LENGTH) ||
+    !isBoundedString(b.company_id, MAX_ID_LENGTH)
+  ) {
     return null;
   }
   return { user_id: b.user_id, company_id: b.company_id };
@@ -126,7 +162,12 @@ function bridgeAuth(req: Request, res: Response, next: NextFunction): void {
     return;
   }
 
-  // Attach claims to request for downstream use
+  // CRIT-1 fix: reject replayed tokens
+  if (!checkAndRecordJti(claims.jti, claims.exp)) {
+    res.status(401).json({ error: "Token already used" });
+    return;
+  }
+
   (req as Request & { bridgeClaims: typeof claims }).bridgeClaims = claims;
   next();
 }
@@ -159,8 +200,6 @@ export function bridgeRoutes(db: Db) {
 
     const now = new Date();
 
-    // Check if user already exists by platform_user_id (stored as account link)
-    // or by email. We use platform_user_id as the primary key for bridge users.
     const existing = await db
       .select({ id: authUsers.id })
       .from(authUsers)
@@ -168,7 +207,6 @@ export function bridgeRoutes(db: Db) {
       .limit(1);
 
     if (existing.length > 0) {
-      // Update existing user
       await db
         .update(authUsers)
         .set({
@@ -183,8 +221,6 @@ export function bridgeRoutes(db: Db) {
       return;
     }
 
-    // Create new user — use platform_user_id as the local ID for
-    // deterministic mapping (no separate account_links table needed)
     await db.insert(authUsers).values({
       id: body.platform_user_id,
       name: body.name,
@@ -207,7 +243,6 @@ export function bridgeRoutes(db: Db) {
 
     const now = new Date();
 
-    // Upsert company membership
     const existing = await db
       .select({ id: companyMemberships.id })
       .from(companyMemberships)
@@ -252,7 +287,6 @@ export function bridgeRoutes(db: Db) {
       return;
     }
 
-    // Verify user exists
     const user = await db
       .select({ id: authUsers.id })
       .from(authUsers)
@@ -260,7 +294,7 @@ export function bridgeRoutes(db: Db) {
       .limit(1);
 
     if (user.length === 0) {
-      res.status(404).json({ error: "User not found" });
+      res.status(400).json({ error: "Invalid request" });
       return;
     }
 
@@ -291,7 +325,7 @@ export function bridgeRoutes(db: Db) {
 
     const now = new Date();
 
-    // Suspend membership
+    // Suspend membership (scoped to company)
     await db
       .update(companyMemberships)
       .set({ status: "suspended", updatedAt: now })
@@ -303,10 +337,26 @@ export function bridgeRoutes(db: Db) {
         ),
       );
 
-    // Delete all sessions for this user
-    await db
-      .delete(authSessions)
-      .where(eq(authSessions.userId, body.user_id));
+    // CRIT-2 fix: Only delete sessions if user has NO remaining active
+    // memberships in any company on this instance. This prevents
+    // cross-company session invalidation.
+    const remainingMemberships = await db
+      .select({ id: companyMemberships.id })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, body.user_id),
+          eq(companyMemberships.status, "active"),
+        ),
+      )
+      .limit(1);
+
+    if (remainingMemberships.length === 0) {
+      await db
+        .delete(authSessions)
+        .where(eq(authSessions.userId, body.user_id));
+    }
 
     res.json({ ok: true });
   });
