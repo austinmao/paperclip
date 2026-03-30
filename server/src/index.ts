@@ -6,6 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
 import type { Request as ExpressRequest, RequestHandler } from "express";
+import { seedLuminaAgents } from "./seed-lumina-agents.js";
 import { and, eq } from "drizzle-orm";
 import {
   createDb,
@@ -715,7 +716,13 @@ export async function startServer(): Promise<StartedServer> {
       resolveListen();
     });
   });
-  
+
+  // Seed Lumina OS agents after server is ready (opt-in via LUMINA_SEED_AGENTS env).
+  // Fire-and-forget: seeding failure should not crash the server.
+  void seedLuminaAgents(db).catch((err) => {
+    logger.error({ err }, "[seed] Agent seeding failed (non-fatal)");
+  });
+
   if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       logger.info({ signal }, "Stopping embedded PostgreSQL");
