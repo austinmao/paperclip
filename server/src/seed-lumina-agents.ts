@@ -40,7 +40,9 @@ const ROSTER_PATHS = [
 	resolve(process.cwd(), "../../config/paperclip-agents.yaml"),
 ];
 
-const GATEWAY_WS_URL = "ws://openclaw.railway.internal:18789";
+// Gateway URL: prefer env var, fall back to Railway internal DNS.
+const GATEWAY_WS_URL =
+	process.env.OPENCLAW_GATEWAY_URL ?? "ws://openclaw.railway.internal:18789";
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
@@ -68,10 +70,39 @@ export async function seedLuminaAgents(db: Db): Promise<void> {
 	}
 
 	let roster: RosterEntry[];
+	let gatewayUrl = GATEWAY_WS_URL;
 	try {
 		const raw = readFileSync(rosterPath, "utf-8");
-		const parsed = parseYaml(raw) as { agents?: RosterEntry[] };
-		roster = parsed?.agents ?? [];
+		const parsed = parseYaml(raw) as { agents?: unknown[]; gateway_url?: string };
+		const rawEntries = parsed?.agents ?? [];
+
+		// Use gateway_url from YAML if present (overrides env/default)
+		if (parsed.gateway_url) {
+			gatewayUrl = parsed.gateway_url;
+		}
+
+		// Validate each entry has required fields
+		roster = rawEntries
+			.filter((entry): entry is Record<string, unknown> =>
+				typeof entry === "object" && entry !== null,
+			)
+			.filter((entry) => {
+				if (!entry.agentId || !entry.name) {
+					logger.warn({ entry }, "[seed] Skipping roster entry missing agentId or name");
+					return false;
+				}
+				return true;
+			})
+			.map((entry) => ({
+				agentId: String(entry.agentId),
+				name: String(entry.name),
+				role: String(entry.role ?? "engineer"),
+				title: String(entry.title ?? entry.name),
+				reportsTo: entry.reportsTo ? String(entry.reportsTo) : null,
+				heartbeatEnabled: Boolean(entry.heartbeatEnabled),
+				budgetMonthlyCents: Number(entry.budgetMonthlyCents) || 5000,
+				type: String(entry.type ?? "proactive"),
+			}));
 	} catch (err) {
 		logger.error({ err, path: rosterPath }, "[seed] Failed to parse agent roster YAML");
 		return;
@@ -125,14 +156,15 @@ export async function seedLuminaAgents(db: Db): Promise<void> {
 		try {
 			await svc.create(companyId, {
 				name: entry.name,
-				role: entry.role ?? "engineer",
-				title: entry.title ?? entry.name,
+				role: entry.role,
+				title: entry.title,
 				adapterType: "openclaw_gateway",
 				adapterConfig: {
-					url: GATEWAY_WS_URL,
+					url: gatewayUrl,
 					agentId: entry.agentId,
 				},
-				budgetMonthlyCents: entry.budgetMonthlyCents ?? 5000,
+				budgetMonthlyCents: entry.budgetMonthlyCents,
+				...(entry.reportsTo ? { reportsTo: entry.reportsTo } : {}),
 			});
 			seeded++;
 		} catch (err) {
