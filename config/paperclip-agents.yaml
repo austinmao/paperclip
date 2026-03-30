@@ -1,0 +1,594 @@
+# Paperclip Agent Roster
+# Used by scripts/paperclip-register-agents.py to register OpenClaw agents in Paperclip.
+# See: docs/superpowers/specs/2026-03-20-paperclip-integration-design.md
+#
+# lifecycle_bridge: Agents enrolled in the paperclip-lifecycle-bridge extension (050).
+#   - supported: Bridge intercepts Paperclip wakes, claims issues, delivers clean briefs.
+#   - unsupported: Agent receives raw Paperclip wake procedure (must handle HTTP itself).
+#   - not_enrolled: Not a Paperclip heartbeat worker.
+
+gateway_url: "ws://127.0.0.1:18789"
+
+agents:
+  # --- CEO: root of the org chart ---
+  - agentId: agents-executive-ceo
+    name: CEO
+    role: ceo
+    title: Chief Executive Officer
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 10000
+    type: task-worker
+    lifecycle_bridge: unsupported
+    completion_mode: in_review
+
+  # --- Task-worker agents (Paperclip-managed heartbeats) ---
+
+  # Bridge-supported specialists (050): direct Paperclip assignment works via bridge
+  - agentId: agents-campaigns-campaign-orchestrator
+    name: Conductor
+    role: pm
+    title: Campaign Orchestrator
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 5000
+    type: task-worker
+    lifecycle_bridge: supported
+    completion_mode: in_review
+
+  - agentId: agents-engineering-email-engineer
+    name: Forge
+    role: engineer
+    title: Email Engineer
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 20000
+    type: task-worker
+    lifecycle_bridge: supported
+    completion_mode: in_review
+
+  - agentId: agents-engineering-frontend-engineer
+    name: Nova
+    role: engineer
+    title: Frontend Engineer
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 5000
+    type: task-worker
+    lifecycle_bridge: supported
+    completion_mode: in_review
+
+  # Registered but not yet bridge-supported — receives raw Paperclip procedure
+  - agentId: agents-content-copywriter
+    name: Quill
+    role: engineer
+    title: Copywriter
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 10000
+    type: task-worker
+    lifecycle_bridge: unsupported
+
+  - agentId: agents-creative-creative-director
+    name: Canvas
+    role: engineer
+    title: Visual Designer
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 5000
+    type: task-worker
+    lifecycle_bridge: unsupported
+
+  - agentId: agents-marketing-brand-designer
+    name: Brand Guardian
+    role: engineer
+    title: Brand Review
+    reportsTo: null
+    heartbeatEnabled: true
+    budgetMonthlyCents: 3000
+    type: task-worker
+    lifecycle_bridge: unsupported
+
+  # --- C-suite managers ---
+  - agentId: agents-executive-cmo
+    name: CMO
+    role: pm
+    title: Chief Marketing Officer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-executive-cto
+    name: CTO
+    role: pm
+    title: Chief Technology Officer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-executive-cco
+    name: CCO
+    role: pm
+    title: Chief Creative Officer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Proactive agents (OpenClaw-managed heartbeats) ---
+  - agentId: agents-sales-director
+    name: Lumina
+    role: pm
+    title: Conversational Sales Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 15000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-operations-coordinator
+    name: Ops Coordinator
+    role: pm
+    title: Operations Routing Hub
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-operations-knowledge-sync
+    name: Meridian
+    role: engineer
+    title: Knowledge Sync
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 2000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-corpus-transcript-curator
+    name: Curator
+    role: engineer
+    title: Transcript Curator
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Engineering specialists ---
+  - agentId: agents-engineering-backend-engineer
+    name: Backend Engineer
+    role: engineer
+    title: Backend Engineer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-engineering-devops-engineer
+    name: DevOps Engineer
+    role: engineer
+    title: DevOps Engineer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Finance ---
+  - agentId: agents-finance-payroll
+    name: Payroll
+    role: engineer
+    title: Payroll Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Marketing specialists ---
+  - agentId: agents-marketing-brand-guardian
+    name: Brand Guardian
+    role: engineer
+    title: Brand Guardian
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-marketing-copywriter
+    name: Quill
+    role: engineer
+    title: Marketing Copywriter
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-marketing-funnel
+    name: Funnel
+    role: pm
+    title: Funnel Strategist
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-marketing-webinar-architect
+    name: Webinar Architect
+    role: pm
+    title: Webinar Architect
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-marketing-webinar
+    name: Webinar
+    role: pm
+    title: Webinar Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Operations specialists ---
+  - agentId: agents-operations-transcript-curator
+    name: Curator
+    role: engineer
+    title: Transcript Ingestion Daemon
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Platform agents ---
+  - agentId: agents-platform-error-coordinator
+    name: Error Coordinator
+    role: engineer
+    title: Error Coordination Specialist
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-relay
+    name: Relay
+    role: engineer
+    title: Relay Sink
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-skill-config-scan
+    name: Config Scan Agent
+    role: engineer
+    title: Skill Config Scanner
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-skill-injection-scan
+    name: Injection Scan Agent
+    role: engineer
+    title: Skill Injection Scanner
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-skill-permission-scan
+    name: Permission Scan Agent
+    role: engineer
+    title: Skill Permission Scanner
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-snyk-skill-scan
+    name: Snyk Skill Scanner
+    role: engineer
+    title: Snyk Skill Scanner
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-platform-workflow-orchestrator
+    name: Workflow Orchestrator
+    role: pm
+    title: Workflow Orchestrator
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Product ---
+  - agentId: agents-product-brand-designer
+    name: Product Brand Designer
+    role: engineer
+    title: Product Brand Designer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Programs ---
+  - agentId: agents-programs-onboarding-application-screening
+    name: Application Screening
+    role: engineer
+    title: Onboarding Application Screener
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-programs-onboarding-intake-coordination
+    name: Intake Coordination
+    role: pm
+    title: Onboarding Intake Coordinator
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-programs-preparation-participant-prep
+    name: Participant Prep
+    role: engineer
+    title: Participant Preparation Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Quality ---
+  - agentId: agents-quality-qa-engineer
+    name: QA Engineer
+    role: engineer
+    title: QA Engineer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-quality-snyk-security-auditor
+    name: Snyk Security Auditor
+    role: engineer
+    title: Snyk Security Auditor
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Sales specialists ---
+  - agentId: agents-sales-coach
+    name: Sales Coach
+    role: pm
+    title: Sales Coach
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-sales-concierge
+    name: Sales Concierge
+    role: engineer
+    title: Sales Concierge
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-sales-enrollment
+    name: Enrollment
+    role: engineer
+    title: Enrollment Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-sales-lead-nurture
+    name: Lead Nurture
+    role: engineer
+    title: Lead Nurture Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-sales-lumina
+    name: Lumina
+    role: engineer
+    title: Conversational Sales Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-sales-pricing-yield
+    name: Pricing Yield
+    role: pm
+    title: Pricing and Yield Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Scaffold ---
+  - agentId: agents-scaffold-interviewer
+    name: Interviewer
+    role: engineer
+    title: Scaffold Interviewer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Strategy ---
+  - agentId: agents-strategy-analytics-engineer
+    name: Analytics Engineer
+    role: engineer
+    title: Analytics Engineer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-strategy-seo-geo-strategist
+    name: SEO/GEO Strategist
+    role: pm
+    title: SEO/GEO Strategist
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  # --- Website department ---
+  - agentId: agents-website-architect
+    name: Blueprint
+    role: engineer
+    title: Website Architect
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-editor
+    name: Proof
+    role: engineer
+    title: Website Content Editor
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-freshness-monitor
+    name: Vigil
+    role: engineer
+    title: Website Freshness Monitor
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-orchestrator
+    name: Construct
+    role: pm
+    title: Website Build Orchestrator
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 10000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-performance-guardian
+    name: Pulse
+    role: engineer
+    title: Website Performance Monitor
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 1000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-qa
+    name: Sentinel
+    role: engineer
+    title: Website QA Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-researcher
+    name: Lens
+    role: engineer
+    title: Website Researcher
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-seo
+    name: Beacon
+    role: engineer
+    title: Website SEO Agent
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-strategist
+    name: Compass
+    role: pm
+    title: Website Strategist
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 5000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-ux-designer
+    name: Pathway
+    role: engineer
+    title: Website UX Designer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
+
+  - agentId: agents-website-visual-designer
+    name: Canvas
+    role: engineer
+    title: Website Visual Designer
+    reportsTo: null
+    heartbeatEnabled: false
+    budgetMonthlyCents: 3000
+    type: proactive
+    lifecycle_bridge: not_enrolled
