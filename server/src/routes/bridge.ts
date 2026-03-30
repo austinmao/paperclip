@@ -262,18 +262,20 @@ export function bridgeRoutes(db: Db) {
     }
 
     // Set the Better Auth session cookie on this domain.
-    // When running on HTTPS, Better Auth uses the __Secure- prefix.
+    // Behind a reverse proxy, Better Auth's auto-detection of secure cookies
+    // may vary. Set both variants so the correct one always matches.
     const isSecure = req.protocol === "https" || req.headers["x-forwarded-proto"] === "https";
-    const cookieName = isSecure
-      ? "__Secure-better-auth.session_token"
-      : "better-auth.session_token";
-    res.cookie(cookieName, sessionToken, {
+    const cookieOpts = {
       httpOnly: true,
       secure: isSecure,
-      sameSite: "lax",
+      sameSite: "lax" as const,
       path: "/",
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days (matches session TTL)
-    });
+    };
+    res.cookie("better-auth.session_token", sessionToken, cookieOpts);
+    if (isSecure) {
+      res.cookie("__Secure-better-auth.session_token", sessionToken, cookieOpts);
+    }
 
     res.redirect("/");
   });
