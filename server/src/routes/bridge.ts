@@ -66,6 +66,34 @@ interface BootstrapBody {
 }
 
 // ---------------------------------------------------------------------------
+// Better Auth cookie signing
+// ---------------------------------------------------------------------------
+// Better Auth uses signed cookies (HMAC-SHA256). The cookie value format is:
+//   `${rawValue}.${base64(HMAC-SHA256(rawValue, secret))}`
+// We replicate this so the sso-landing endpoint can set a cookie that
+// Better Auth's getSignedCookie() will accept.
+
+async function signCookieForBetterAuth(
+  value: string,
+  secret: string,
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(value),
+  );
+  const base64Sig = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `${value}.${base64Sig}`;
+}
+
+// ---------------------------------------------------------------------------
 // JTI replay prevention (CRIT-1 fix)
 // ---------------------------------------------------------------------------
 
@@ -261,6 +289,14 @@ export function bridgeRoutes(db: Db) {
       return;
     }
 
+    // Sign the cookie value using Better Auth's HMAC-SHA256 cookie signing.
+    // Better Auth's getSignedCookie() expects: value.base64(HMAC-SHA256(value, secret))
+    const betterAuthSecret =
+      process.env.BETTER_AUTH_SECRET ??
+      process.env.PAPERCLIP_AGENT_JWT_SECRET ??
+      "paperclip-dev-secret";
+    const signedValue = await signCookieForBetterAuth(sessionToken, betterAuthSecret);
+
     // Set the Better Auth session cookie on this domain.
     // Behind a reverse proxy, Better Auth's auto-detection of secure cookies
     // may vary. Set both variants so the correct one always matches.
@@ -272,9 +308,9 @@ export function bridgeRoutes(db: Db) {
       path: "/",
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days (matches session TTL)
     };
-    res.cookie("better-auth.session_token", sessionToken, cookieOpts);
+    res.cookie("better-auth.session_token", signedValue, cookieOpts);
     if (isSecure) {
-      res.cookie("__Secure-better-auth.session_token", sessionToken, cookieOpts);
+      res.cookie("__Secure-better-auth.session_token", signedValue, cookieOpts);
     }
 
     res.redirect("/");
