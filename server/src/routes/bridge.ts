@@ -24,7 +24,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { eq, and } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { authUsers, authSessions, companyMemberships } from "@paperclipai/db";
+import { authUsers, authSessions, companyMemberships, companies, instanceUserRoles } from "@paperclipai/db";
 import { verifyBridgeJwt } from "../bridge-auth-jwt.js";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,11 @@ interface CreateSessionBody {
 interface RevokeAccessBody {
   user_id: string;
   company_id: string;
+}
+
+interface BootstrapBody {
+  company_name: string;
+  admin_user_id: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +135,18 @@ function validateCreateSession(body: unknown): CreateSessionBody | null {
   const b = body as Record<string, unknown>;
   if (!isBoundedString(b.user_id, MAX_ID_LENGTH)) return null;
   return { user_id: b.user_id };
+}
+
+function validateBootstrap(body: unknown): BootstrapBody | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (
+    !isBoundedString(b.company_name, MAX_STRING_LENGTH) ||
+    !isBoundedString(b.admin_user_id, MAX_ID_LENGTH)
+  ) {
+    return null;
+  }
+  return { company_name: b.company_name, admin_user_id: b.admin_user_id };
 }
 
 function validateRevokeAccess(body: unknown): RevokeAccessBody | null {
@@ -359,6 +376,103 @@ export function bridgeRoutes(db: Db) {
     }
 
     res.json({ ok: true });
+  });
+
+  // ── POST /bootstrap ──────────────────────────────────────────────────
+  // Idempotent first-time setup: create company + grant instance_admin role.
+  // Called by Lumina platform after claiming a warm pool instance.
+  router.post("/bootstrap", async (req: Request, res: Response) => {
+    const body = validateBootstrap(req.body);
+    if (!body) {
+      res.status(400).json({ error: "Invalid request body" });
+      return;
+    }
+
+    const now = new Date();
+
+    // Verify the admin user exists
+    const user = await db
+      .select({ id: authUsers.id })
+      .from(authUsers)
+      .where(eq(authUsers.id, body.admin_user_id))
+      .limit(1);
+
+    if (user.length === 0) {
+      res.status(400).json({ error: "Admin user not found — call upsert-user first" });
+      return;
+    }
+
+    // Create company (idempotent — check if one already exists)
+    const existingCompanies = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .limit(1);
+
+    let companyId: string;
+
+    if (existingCompanies.length > 0) {
+      companyId = existingCompanies[0].id;
+    } else {
+      const [newCompany] = await db
+        .insert(companies)
+        .values({
+          name: body.company_name,
+          status: "active",
+          issuePrefix: "LUM",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: companies.id });
+      companyId = newCompany.id;
+    }
+
+    // Grant instance_admin role (idempotent — ON CONFLICT DO NOTHING via check)
+    const existingRole = await db
+      .select({ id: instanceUserRoles.id })
+      .from(instanceUserRoles)
+      .where(
+        and(
+          eq(instanceUserRoles.userId, body.admin_user_id),
+          eq(instanceUserRoles.role, "instance_admin"),
+        ),
+      )
+      .limit(1);
+
+    if (existingRole.length === 0) {
+      await db.insert(instanceUserRoles).values({
+        userId: body.admin_user_id,
+        role: "instance_admin",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // Create owner membership in the company
+    const existingMembership = await db
+      .select({ id: companyMemberships.id })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, body.admin_user_id),
+        ),
+      )
+      .limit(1);
+
+    if (existingMembership.length === 0) {
+      await db.insert(companyMemberships).values({
+        companyId,
+        principalType: "user",
+        principalId: body.admin_user_id,
+        membershipRole: "owner",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    res.json({ company_id: companyId, ok: true });
   });
 
   return router;
