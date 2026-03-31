@@ -24,7 +24,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { eq, and } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { authUsers, authSessions, companyMemberships } from "@paperclipai/db";
+import { authUsers, authSessions, companyMemberships, companies, instanceUserRoles } from "@paperclipai/db";
 import { verifyBridgeJwt } from "../bridge-auth-jwt.js";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,39 @@ interface CreateSessionBody {
 interface RevokeAccessBody {
   user_id: string;
   company_id: string;
+}
+
+interface BootstrapBody {
+  company_name: string;
+  admin_user_id: string;
+}
+
+// ---------------------------------------------------------------------------
+// Better Auth cookie signing
+// ---------------------------------------------------------------------------
+// Better Auth uses signed cookies (HMAC-SHA256). The cookie value format is:
+//   `${rawValue}.${base64(HMAC-SHA256(rawValue, secret))}`
+// We replicate this so the sso-landing endpoint can set a cookie that
+// Better Auth's getSignedCookie() will accept.
+
+async function signCookieForBetterAuth(
+  value: string,
+  secret: string,
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(value),
+  );
+  const base64Sig = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `${value}.${base64Sig}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +165,18 @@ function validateCreateSession(body: unknown): CreateSessionBody | null {
   return { user_id: b.user_id };
 }
 
+function validateBootstrap(body: unknown): BootstrapBody | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (
+    !isBoundedString(b.company_name, MAX_STRING_LENGTH) ||
+    !isBoundedString(b.admin_user_id, MAX_ID_LENGTH)
+  ) {
+    return null;
+  }
+  return { company_name: b.company_name, admin_user_id: b.admin_user_id };
+}
+
 function validateRevokeAccess(body: unknown): RevokeAccessBody | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
@@ -187,7 +232,91 @@ function generateId(): string {
 export function bridgeRoutes(db: Db) {
   const router = Router();
 
-  // All bridge routes require bridge JWT auth
+  // ── GET /sso-landing ──────────────────────────────────────────────────
+  // Browser redirect target for cross-domain SSO. Registered BEFORE the
+  // bridgeAuth middleware because this is a browser GET (no Bearer token).
+  // The handoff JWT itself is verified inline for authentication.
+  router.get("/sso-landing", async (req: Request, res: Response) => {
+    const handoff = req.query.handoff;
+    if (typeof handoff !== "string" || !handoff) {
+      res.status(400).json({ error: "Missing handoff parameter" });
+      return;
+    }
+
+    // Verify the handoff JWT (same verification as bridge auth)
+    const claims = verifyBridgeJwt(handoff);
+    if (!claims) {
+      res.status(401).json({ error: "Invalid or expired handoff token" });
+      return;
+    }
+
+    // Reject replayed tokens
+    if (!checkAndRecordJti(claims.jti, claims.exp)) {
+      res.status(401).json({ error: "Token already used" });
+      return;
+    }
+
+    // Extract session token from JWT claims
+    const parts = handoff.split(".");
+    if (parts.length !== 3) {
+      res.status(400).json({ error: "Malformed handoff token" });
+      return;
+    }
+
+    let sessionToken: string | undefined;
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      sessionToken = typeof payload.session_token === "string" ? payload.session_token : undefined;
+    } catch {
+      res.status(400).json({ error: "Malformed handoff token" });
+      return;
+    }
+
+    if (!sessionToken) {
+      res.status(400).json({ error: "Missing session token in handoff" });
+      return;
+    }
+
+    // Verify the session exists in the database
+    const session = await db
+      .select({ id: authSessions.id })
+      .from(authSessions)
+      .where(eq(authSessions.token, sessionToken))
+      .limit(1);
+
+    if (session.length === 0) {
+      res.status(400).json({ error: "Invalid session" });
+      return;
+    }
+
+    // Sign the cookie value using Better Auth's HMAC-SHA256 cookie signing.
+    // Better Auth's getSignedCookie() expects: value.base64(HMAC-SHA256(value, secret))
+    const betterAuthSecret =
+      process.env.BETTER_AUTH_SECRET ??
+      process.env.PAPERCLIP_AGENT_JWT_SECRET ??
+      "paperclip-dev-secret";
+    const signedValue = await signCookieForBetterAuth(sessionToken, betterAuthSecret);
+
+    // Set the Better Auth session cookie on this domain.
+    // Behind a reverse proxy, Better Auth's auto-detection of secure cookies
+    // may vary. Set both variants so the correct one always matches.
+    const isSecure = req.protocol === "https" || req.headers["x-forwarded-proto"] === "https";
+    const cookieOpts = {
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: "lax" as const,
+      path: "/",
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days (matches session TTL)
+    };
+    res.cookie("better-auth.session_token", signedValue, cookieOpts);
+    if (isSecure) {
+      res.cookie("__Secure-better-auth.session_token", signedValue, cookieOpts);
+    }
+
+    res.redirect("/");
+  });
+
+  // All remaining bridge routes require bridge JWT auth
   router.use(bridgeAuth);
 
   // ── POST /upsert-user ───────────────────────────────────────────────────
@@ -359,6 +488,103 @@ export function bridgeRoutes(db: Db) {
     }
 
     res.json({ ok: true });
+  });
+
+  // ── POST /bootstrap ──────────────────────────────────────────────────
+  // Idempotent first-time setup: create company + grant instance_admin role.
+  // Called by Lumina platform after claiming a warm pool instance.
+  router.post("/bootstrap", async (req: Request, res: Response) => {
+    const body = validateBootstrap(req.body);
+    if (!body) {
+      res.status(400).json({ error: "Invalid request body" });
+      return;
+    }
+
+    const now = new Date();
+
+    // Verify the admin user exists
+    const user = await db
+      .select({ id: authUsers.id })
+      .from(authUsers)
+      .where(eq(authUsers.id, body.admin_user_id))
+      .limit(1);
+
+    if (user.length === 0) {
+      res.status(400).json({ error: "Admin user not found — call upsert-user first" });
+      return;
+    }
+
+    // Create company (idempotent — check if one already exists)
+    const existingCompanies = await db
+      .select({ id: companies.id })
+      .from(companies)
+      .limit(1);
+
+    let companyId: string;
+
+    if (existingCompanies.length > 0) {
+      companyId = existingCompanies[0].id;
+    } else {
+      const [newCompany] = await db
+        .insert(companies)
+        .values({
+          name: body.company_name,
+          status: "active",
+          issuePrefix: "LUM",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: companies.id });
+      companyId = newCompany.id;
+    }
+
+    // Grant instance_admin role (idempotent — ON CONFLICT DO NOTHING via check)
+    const existingRole = await db
+      .select({ id: instanceUserRoles.id })
+      .from(instanceUserRoles)
+      .where(
+        and(
+          eq(instanceUserRoles.userId, body.admin_user_id),
+          eq(instanceUserRoles.role, "instance_admin"),
+        ),
+      )
+      .limit(1);
+
+    if (existingRole.length === 0) {
+      await db.insert(instanceUserRoles).values({
+        userId: body.admin_user_id,
+        role: "instance_admin",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // Create owner membership in the company
+    const existingMembership = await db
+      .select({ id: companyMemberships.id })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, body.admin_user_id),
+        ),
+      )
+      .limit(1);
+
+    if (existingMembership.length === 0) {
+      await db.insert(companyMemberships).values({
+        companyId,
+        principalType: "user",
+        principalId: body.admin_user_id,
+        membershipRole: "owner",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    res.json({ company_id: companyId, ok: true });
   });
 
   return router;
