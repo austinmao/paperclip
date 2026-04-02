@@ -65,7 +65,7 @@ function redactConnectionString(raw: string): string {
   }
 }
 
-function resolveAgentJwtSecretStatus(
+function resolveAgentAuthSecretStatus(
   envFilePath: string,
 ): {
   status: "pass" | "warn";
@@ -103,7 +103,7 @@ export function printStartupBanner(opts: StartupBannerOptions): void {
   const uiUrl = opts.uiMode === "none" ? "disabled" : baseUrl;
   const configPath = resolvePaperclipConfigPath();
   const envFilePath = resolvePaperclipEnvPath();
-  const agentJwtSecret = resolveAgentJwtSecretStatus(envFilePath);
+  const agentAuthSecret = resolveAgentAuthSecretStatus(envFilePath);
 
   const dbMode =
     opts.db.mode === "embedded-postgres"
@@ -155,16 +155,16 @@ export function printStartupBanner(opts: StartupBannerOptions): void {
     row("Database", dbDetails),
     row("Migrations", opts.migrationSummary),
     row(
-      "Agent JWT",
-      agentJwtSecret.status === "pass"
-        ? color(agentJwtSecret.message, "green")
-        : color(agentJwtSecret.message, "yellow"),
+      "Agent Auth",
+      agentAuthSecret.status === "pass"
+        ? color(agentAuthSecret.message, "green")
+        : color(agentAuthSecret.message, "yellow"),
     ),
     row("Heartbeat", heartbeat),
     row("DB Backup", dbBackup),
     row("Backup Dir", opts.databaseBackupDir),
     row("Config", configPath),
-    agentJwtSecret.status === "warn"
+    agentAuthSecret.status === "warn"
       ? color("  ───────────────────────────────────────────────────────", "yellow")
       : null,
     color("  ───────────────────────────────────────────────────────", "blue"),

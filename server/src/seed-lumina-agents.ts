@@ -113,7 +113,7 @@ export async function seedLuminaAgents(db: Db): Promise<void> {
 		return;
 	}
 
-	// Find the first company (created by bridge upsert-user during onboarding)
+	// Find the first company created during onboarding.
 	const companyRows = await db
 		.select({ id: companies.id, name: companies.name })
 		.from(companies)
