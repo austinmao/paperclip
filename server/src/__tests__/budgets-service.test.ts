@@ -11,14 +11,16 @@ type SelectResult = unknown[];
 
 function createDbStub(selectResults: SelectResult[]) {
   const pendingSelects = [...selectResults];
-  const selectWhere = vi.fn(async () => pendingSelects.shift() ?? []);
-  const selectThen = vi.fn((resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(pendingSelects.shift() ?? [])));
-  const selectOrderBy = vi.fn(async () => pendingSelects.shift() ?? []);
-  const selectFrom = vi.fn(() => ({
+  const runSelect = () => pendingSelects.shift() ?? [];
+  const selectWhere = vi.fn(() => query);
+  const selectThen = vi.fn((resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(runSelect() as unknown[])));
+  const selectOrderBy = vi.fn(async () => runSelect());
+  const query = {
     where: selectWhere,
     then: selectThen,
     orderBy: selectOrderBy,
-  }));
+  };
+  const selectFrom = vi.fn(() => query);
   const select = vi.fn(() => ({
     from: selectFrom,
   }));
@@ -307,5 +309,70 @@ describe("budgetService", () => {
         updatedAt: expect.any(Date),
       }),
     );
+  });
+
+  it("skips stale scoped incidents when building overview", async () => {
+    const companyPolicy = {
+      id: "policy-company-1",
+      companyId: "company-1",
+      scopeType: "company",
+      scopeId: "company-1",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+    };
+    const staleIncident = {
+      id: "incident-stale",
+      companyId: "company-1",
+      policyId: "policy-company-1",
+      scopeType: "agent",
+      scopeId: "agent-missing",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      windowStart: new Date("2026-04-01T00:00:00.000Z"),
+      windowEnd: new Date("2026-05-01T00:00:00.000Z"),
+      thresholdType: "hard",
+      amountLimit: 50,
+      amountObserved: 75,
+      status: "open",
+      approvalId: null,
+      resolvedAt: null,
+      createdAt: new Date("2026-04-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+    };
+
+    const dbStub = createDbStub([
+      [companyPolicy],
+      [{
+        companyId: "company-1",
+        name: "Paperclip",
+        status: "active",
+        pauseReason: null,
+        pausedAt: null,
+      }],
+      [{ total: 10 }],
+      [staleIncident],
+      [],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const overview = await service.overview("company-1");
+
+    expect(overview.policies).toHaveLength(1);
+    expect(overview.policies[0]).toEqual(
+      expect.objectContaining({
+        policyId: "policy-company-1",
+        scopeType: "company",
+        scopeId: "company-1",
+        scopeName: "Paperclip",
+      }),
+    );
+    expect(overview.activeIncidents).toEqual([]);
+    expect(overview.pendingApprovalCount).toBe(0);
   });
 });

@@ -139,6 +139,20 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
   };
 }
 
+function isMissingBudgetScopeError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { status?: unknown }).status === 404 &&
+    "message" in error &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    ["Company not found", "Agent not found", "Project not found"].includes(
+      (error as { message: string }).message,
+    )
+  );
+}
+
 async function computeObservedAmount(
   db: Db,
   policy: Pick<PolicyRow, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">,
@@ -627,13 +641,34 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
     overview: async (companyId: string): Promise<BudgetOverview> => {
       const rows = await listPolicyRows(companyId);
-      const policies = await Promise.all(rows.map((row) => buildPolicySummary(row)));
+      const policyResults = await Promise.all(
+        rows.map(async (row) => {
+          try {
+            return await buildPolicySummary(row);
+          } catch (error) {
+            if (isMissingBudgetScopeError(error)) return null;
+            throw error;
+          }
+        }),
+      );
+      const policies = policyResults.filter((policy): policy is BudgetPolicySummary => policy !== null);
       const activeIncidentRows = await db
         .select()
         .from(budgetIncidents)
         .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.status, "open")))
         .orderBy(desc(budgetIncidents.createdAt));
-      const activeIncidents = await hydrateIncidentRows(activeIncidentRows);
+      const incidentResults = await Promise.all(
+        activeIncidentRows.map(async (row) => {
+          try {
+            const [incident] = await hydrateIncidentRows([row]);
+            return incident ?? null;
+          } catch (error) {
+            if (isMissingBudgetScopeError(error)) return null;
+            throw error;
+          }
+        }),
+      );
+      const activeIncidents = incidentResults.filter((incident): incident is BudgetIncident => incident !== null);
       return {
         companyId,
         policies,
