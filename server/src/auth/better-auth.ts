@@ -12,6 +12,14 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+// spec-201: the ONE owned IdP customization surface (jwt + oauthProvider →
+// verifiable JWT w/ aud+org_id, trusted clients). Replaces the retired
+// patch-package overlay. Seam contract test (C-IDP-4) pins the assembled set.
+import { openclawIdpPlugins } from "./openclaw-idp.js";
+// spec-201: drizzle models for the 5 better-auth 1.6 IdP-only tables (jwks +
+// oauth-provider tables). Required in the adapter `schema` because an explicit
+// schema makes the drizzle adapter resolve EVERY plugin model from it.
+import { idpAuthSchema } from "./ensure-idp-tables.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -122,7 +130,7 @@ export function deriveAuthTrustedOrigins(config: Config, opts?: { listenPort?: n
   return Array.from(trustedOrigins);
 }
 
-export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
+export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]) {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
   const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET;
@@ -151,6 +159,9 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
         session: authSessions,
         account: authAccounts,
         verification: authVerifications,
+        // spec-201: IdP-only tables (jwks + oauth-provider) so the jwt +
+        // oauthProvider plugins resolve their models against the explicit schema.
+        ...idpAuthSchema,
       },
     }),
     emailAndPassword: {
@@ -159,6 +170,9 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       disableSignUp: config.authDisableSignUp,
     },
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+    // spec-201: inject the owned IdP customization (jwt + oauthProvider). One
+    // line — all behavior + the C-IDP-4 seam guard live in openclaw-idp.ts.
+    plugins: openclawIdpPlugins({ baseUrl }, db),
   };
 
   if (!baseUrl) {
