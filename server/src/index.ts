@@ -520,6 +520,9 @@ export async function startServer(): Promise<StartedServer> {
   
   let authReady = config.deploymentMode === "local_trusted";
   let betterAuthHandler: RequestHandler | undefined;
+  // spec-201 scratch-fork proof: assigned inside the authenticated branch where
+  // the better-auth `auth` instance + `db` are in scope.
+  let gatewayTokenMintHandlerInstance: RequestHandler | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -541,6 +544,12 @@ export async function startServer(): Promise<StartedServer> {
       resolveBetterAuthSession,
       resolveBetterAuthSessionFromHeaders,
     } = await import("./auth/better-auth.js");
+    // spec-201: the 5 better-auth 1.6 IdP-only tables (jwks + oauth-provider
+    // tables) are not in @paperclipai/db, so create them at boot before the auth
+    // instance resolves them. Then seed the trusted first-party OIDC clients.
+    const { ensureIdpAuthTables } = await import("./auth/ensure-idp-tables.js");
+    const { seedOpenclawTrustedClients, gatewayTokenMintHandler } = await import("./auth/openclaw-idp.js");
+    await ensureIdpAuthTables(db as any);
     const derivedTrustedOrigins = deriveAuthTrustedOrigins(config, { listenPort });
     const envTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
       .split(",")
@@ -560,7 +569,9 @@ export async function startServer(): Promise<StartedServer> {
       "Authenticated mode auth origin configuration",
     );
     const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
+    await seedOpenclawTrustedClients(db as any);
     betterAuthHandler = createBetterAuthHandler(auth);
+    gatewayTokenMintHandlerInstance = gatewayTokenMintHandler(auth as any, db as any) as unknown as RequestHandler;
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
@@ -662,6 +673,7 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    gatewayTokenMintHandler: gatewayTokenMintHandlerInstance,
     resolveSession,
     pluginWorkerManager,
   });

@@ -153,6 +153,8 @@ export async function createApp(
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
+    // spec-201 scratch-fork proof: S2S gateway-token mint handler.
+    gatewayTokenMintHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
   },
 ) {
@@ -199,6 +201,9 @@ export async function createApp(
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
+  }
+  if (opts.gatewayTokenMintHandler) {
+    app.post("/internal/gateway-token", opts.gatewayTokenMintHandler);
   }
   app.use(llmRoutes(db));
 
