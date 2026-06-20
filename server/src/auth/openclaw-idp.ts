@@ -69,7 +69,7 @@ import { jwt } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import type { OAuthOptions, SchemaClient, Scope } from "@better-auth/oauth-provider";
 import type { BetterAuthPlugin } from "better-auth";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { timingSafeEqual, createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -111,14 +111,14 @@ export interface OpenclawIdpConfig {
   readonly baseUrl?: string;
 }
 
-/** A `db.execute`-capable handle (drizzle). Loose to avoid coupling to the fork's exact type. */
+/**
+ * A `db.execute`-capable handle (drizzle). The param is the drizzle `SQL` type the
+ * overlay actually passes (every call is `db.execute(sql`...`)`); typing it that way
+ * (not `unknown`) lets the fork's real `PostgresJsDatabase` satisfy this structural
+ * type under strictFunctionTypes contravariance.
+ */
 type DbExecutor = {
-  // Method-shorthand (not an arrow-typed property): TS checks method-shorthand
-  // signatures bivariantly even under strictFunctionTypes, which is required
-  // here — drizzle's own `db.execute(query: string | SQLWrapper)` is
-  // structurally narrower than `(query: unknown)`, and this type only needs to
-  // describe "has a callable execute", not enforce contravariant strictness.
-  execute(query: unknown): Promise<unknown>;
+  execute: (query: SQL) => Promise<unknown>;
 };
 
 /** Better Auth instance shape the mint handler needs (only `api.signJWT`). */
@@ -370,8 +370,12 @@ export function openclawIdpPlugins(
   return [
     // EdDSA/Ed25519 by default; JWKS served at <basePath>/jwks. Signing key
     // MUST be preserved across cutover (kid stability — C-IDP-5).
-    jwt() as unknown as BetterAuthPlugin,
-    oauthProvider(buildOauthProviderConfig(config, db)) as unknown as BetterAuthPlugin,
+    jwt({ jwt: { issuer: config.baseUrl ?? OPENCLAW_IDP_ISSUER } }) as unknown as BetterAuthPlugin,
+    // The config's scopes are typed as a supported-scopes subset; oauthProvider's
+    // scope generic is invariant because scopes also appear in callback params.
+    oauthProvider(
+      buildOauthProviderConfig(config, db) as Parameters<typeof oauthProvider>[0],
+    ) as unknown as BetterAuthPlugin,
   ];
 }
 
