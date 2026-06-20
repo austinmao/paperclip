@@ -39,12 +39,17 @@
  * NOT EXISTS`, safe to call on every boot.
  */
 
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { pgTable, text, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
 
-/** A `db.execute`-capable handle (drizzle). Loose to avoid coupling to the fork's exact type. */
+/**
+ * A `db.execute`-capable handle (drizzle). The param is the drizzle `SQL` type the
+ * overlay actually passes (every call is `db.execute(sql`...`)`); typing it that way
+ * (not `unknown`) lets the fork's real `PostgresJsDatabase` satisfy this structural
+ * type under strictFunctionTypes contravariance.
+ */
 type DbExecutor = {
-  execute: (query: unknown) => Promise<unknown>;
+  execute: (query: SQL) => Promise<unknown>;
 };
 
 const MANAGED_JSONB_COLUMNS = [

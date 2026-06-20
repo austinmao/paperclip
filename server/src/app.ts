@@ -49,6 +49,8 @@ import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { applyUiBranding } from "./ui-branding.js";
+import { renderOidcLoginPage } from "./auth/oidc-login-page.js";
+import { OPENCLAW_IDP_ISSUER } from "./auth/openclaw-idp.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
@@ -89,6 +91,36 @@ const VITE_DEV_STATIC_PATHS = new Set([
   "/site.webmanifest",
   "/sw.js",
 ]);
+
+function normalizeIssuerUrl(value: string | undefined): string {
+  const candidate = value?.trim() || OPENCLAW_IDP_ISSUER;
+  try {
+    const parsed = new URL(candidate);
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return OPENCLAW_IDP_ISSUER;
+  }
+}
+
+function buildOpenIdConfiguration(issuer: string) {
+  return {
+    issuer,
+    authorization_endpoint: `${issuer}/api/auth/oauth2/authorize`,
+    token_endpoint: `${issuer}/api/auth/oauth2/token`,
+    userinfo_endpoint: `${issuer}/api/auth/oauth2/userinfo`,
+    jwks_uri: `${issuer}/api/auth/jwks`,
+    introspection_endpoint: `${issuer}/api/auth/oauth2/introspect`,
+    revocation_endpoint: `${issuer}/api/auth/oauth2/revoke`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "client_credentials", "refresh_token"],
+    scopes_supported: ["openid", "profile", "email", "offline_access"],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: ["EdDSA"],
+  };
+}
 
 export function isDatabaseConnectionUnavailableError(err: unknown): boolean {
   const error = err as { code?: unknown; message?: unknown; cause?: unknown };
@@ -200,8 +232,23 @@ export async function createApp(
   );
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
+    app.get("/.well-known/openid-configuration", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOpenIdConfiguration(issuer));
+    });
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
+  app.get("/oidc-login", (_req, res) => {
+    res
+      .status(200)
+      .type("html")
+      .set("Cache-Control", "no-cache")
+      .send(renderOidcLoginPage());
+  });
   if (opts.gatewayTokenMintHandler) {
     app.post("/internal/gateway-token", opts.gatewayTokenMintHandler);
   }
