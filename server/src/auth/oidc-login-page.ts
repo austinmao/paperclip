@@ -1,12 +1,43 @@
 export const OIDC_LOGIN_TEAL_HSL = "172 76% 42%";
 
+/** Platform brand shown on the hosted login page. */
+export const DEFAULT_OIDC_APP_NAME = "Glance";
+
+/** Escape a value before interpolating it into the login HTML (env-sourced
+ *  strings must not be able to inject markup). */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Brand name in the title + heading. Env-overridable (OPENCLAW_OIDC_APP_NAME)
+ *  so the shared IdP login can be rebranded per deployment without a code
+ *  change; defaults to the platform brand. */
+function oidcAppName(): string {
+  const raw = process.env.OPENCLAW_OIDC_APP_NAME?.trim();
+  return escapeHtml(raw && raw.length > 0 ? raw : DEFAULT_OIDC_APP_NAME);
+}
+
+/** Optional subtitle under the heading. Empty by default — the internal IdP
+ *  name is not surfaced to end users. Set OPENCLAW_OIDC_SUBTITLE to show one. */
+function oidcSubtitle(): string {
+  const raw = process.env.OPENCLAW_OIDC_SUBTITLE?.trim();
+  return raw ? `\n<p>${escapeHtml(raw)}</p>` : "";
+}
+
 export function renderOidcLoginPage(): string {
+  const appName = oidcAppName();
+  const subtitle = oidcSubtitle();
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in to OpenClaw</title>
+<title>Sign in to ${appName}</title>
 <style>
 :root{--oc-accent:${OIDC_LOGIN_TEAL_HSL};--primary:${OIDC_LOGIN_TEAL_HSL};--primary-foreground:0 0% 100%;--ring:${OIDC_LOGIN_TEAL_HSL};--blue-9:hsl(${OIDC_LOGIN_TEAL_HSL});--background:240 11% 99%;--foreground:220 13% 4%;--muted:220 9% 46%;--border:220 13% 91%;}
 *{box-sizing:border-box}
@@ -26,8 +57,7 @@ button:disabled{opacity:.65;cursor:wait}
 </head>
 <body>
 <main>
-<h1>Sign in to OpenClaw</h1>
-<p>Use your Paperclip account to continue.</p>
+<h1>Sign in to ${appName}</h1>${subtitle}
 <form id="login-form">
 <label>Email<input name="email" type="email" autocomplete="email" required autofocus></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
