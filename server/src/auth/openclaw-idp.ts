@@ -631,6 +631,7 @@ function shouldRedirectAgentsHtmlRequest(req: AgentsSsoRedirectRequest): boolean
   if (
     path.startsWith("/api/") ||
     path.startsWith("/assets/") ||
+    path.startsWith("/.well-known/") ||
     path.startsWith("/openclaw-sso/") ||
     path === "/health" ||
     path === "/favicon.ico" ||
