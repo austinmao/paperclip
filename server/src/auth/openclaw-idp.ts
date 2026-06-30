@@ -615,7 +615,6 @@ type AgentsSsoRedirectRequest = {
   path?: string;
   originalUrl?: string;
   method?: string;
-  accepts?: (types: string[]) => string | false | undefined;
   actor?: { source?: string };
 };
 type AgentsSsoRedirectResponse = {
@@ -639,7 +638,7 @@ function shouldRedirectAgentsHtmlRequest(req: AgentsSsoRedirectRequest): boolean
   ) {
     return false;
   }
-  return req.accepts?.(["html"]) === "html";
+  return true;
 }
 
 export function createOpenclawAgentsSsoRedirectMiddleware(opts: AgentsSsoRedirectMiddlewareOptions = {}) {
@@ -889,6 +888,7 @@ export function openclawIdpPlugins(
   config: OpenclawIdpConfig,
   db: DbExecutor,
 ): BetterAuthPlugin[] {
+  assertHostedAuthEmailConfigured();
   return [
     dcrRegistrationGuardPlugin(db),
     agentsSsoBridgePlugin(),
@@ -896,8 +896,13 @@ export function openclawIdpPlugins(
     // MUST be preserved across cutover (kid stability — C-IDP-5).
     jwt({ jwt: { issuer: config.baseUrl ?? OPENCLAW_IDP_ISSUER } }) as unknown as BetterAuthPlugin,
     magicLink({
-      sendMagicLink: async ({ email, url }) => {
-        await sendMagicLinkEmail({ email, magicUrl: url });
+      sendMagicLink: ({ email, url }) => {
+        void sendMagicLinkEmail({ email, magicUrl: url }).catch((err) => {
+          console.error(
+            `[paperclip-idp] magic link email delivery failed for ${email}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
       },
     }) as unknown as BetterAuthPlugin,
     // The config's scopes are typed `InternallySupportedScopes[]` (a subset of
@@ -976,6 +981,12 @@ function authEmailFromAddress(): string {
     process.env.RESEND_FROM_EMAIL ??
     "Glance <noreply@getglance.com>"
   );
+}
+
+export function assertHostedAuthEmailConfigured(): void {
+  if (!process.env.RESEND_API_KEY?.trim()) {
+    throw new Error("RESEND_API_KEY is required for hosted Glance login email delivery");
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -1142,9 +1153,14 @@ export async function sendResetPasswordRedacted(args: ResetPasswordArgs): Promis
   if (!args.url) {
     throw new Error("Better Auth password reset callback did not provide a reset URL");
   }
-  await sendResetPasswordEmail({
+  void sendResetPasswordEmail({
     email: args.user.email,
     resetUrl: args.url,
+  }).catch((err) => {
+    console.error(
+      `[paperclip-idp] password reset email delivery failed for ${args.user.email}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
   });
   console.info(
     `[paperclip-idp] password reset requested for ${args.user.email} ` +

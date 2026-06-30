@@ -213,7 +213,7 @@ resetForm.addEventListener("submit",async(event)=>{
 const params=new URLSearchParams(window.location.search);
 if(params.get("state")==="reset-password"||params.has("token")){
   showPanel("reset-panel");
-}else if(params.get("state")==="expired-link"){
+}else if(params.get("state")==="expired-link"||params.get("error")==="INVALID_TOKEN"){
   showPanel("expired-panel");
 }
 </script>
