@@ -53,6 +53,7 @@ import { renderOidcLoginPage } from "./auth/oidc-login-page.js";
 import { renderOidcConsentPage } from "./auth/oidc-consent-page.js";
 import {
   createOpenclawAgentsSsoRedirectMiddleware,
+  OPENCLAW_CONNECTOR_AUDIENCE,
   OPENCLAW_IDP_ISSUER,
 } from "./auth/openclaw-idp.js";
 import {
@@ -128,6 +129,15 @@ function buildOpenIdConfiguration(issuer: string) {
     scopes_supported: ["openid", "profile", "email", "offline_access"],
     subject_types_supported: ["public"],
     id_token_signing_alg_values_supported: ["EdDSA"],
+  };
+}
+
+function buildOAuthProtectedResourceMetadata(issuer: string) {
+  return {
+    resource: OPENCLAW_CONNECTOR_AUDIENCE,
+    authorization_servers: [issuer],
+    bearer_methods_supported: ["header"],
+    scopes_supported: ["openid", "profile", "email", "offline_access"],
   };
 }
 
@@ -267,6 +277,14 @@ export async function createApp(
         .type("application/json")
         .set("Cache-Control", "no-store")
         .send(buildOpenIdConfiguration(issuer));
+    });
+    app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOAuthProtectedResourceMetadata(issuer));
     });
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
