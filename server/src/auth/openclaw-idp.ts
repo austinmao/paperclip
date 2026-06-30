@@ -25,8 +25,8 @@
  *     guarded S2S mint route (`signJWT`).
  *
  *   - `oauthProvider({...})` (1.4→1.6: replaces 1.4's `oidcProvider`):
- *       · `validAudiences` — includes the connector audience
- *         `https://connector.holalumina.com/mcp`. 1.6 issues a *verifiable JWT*
+ *       · `validAudiences` — includes the canonical connector audience
+ *         `https://connector.getglance.com/mcp`. 1.6 issues a *verifiable JWT*
  *         access token (carrying `aud` + `org_id`) when the token request names
  *         a `resource` in this list; a request for an audience NOT in the list
  *         is rejected — never a silent opaque downgrade (C-IDP-1, C-IDP-3).
@@ -61,14 +61,17 @@
  * `openclawIdpPlugins` + `getOpenclawTrustedClients`.
  */
 
-import { jwt } from "better-auth/plugins";
+import { APIError, type BetterAuthPlugin } from "better-auth";
+import { createAuthEndpoint } from "better-auth/api";
+import { setSessionCookie } from "better-auth/cookies";
+import { jwt, magicLink } from "better-auth/plugins";
 // 1.4→1.6: `oidcProvider` moved out of `better-auth/plugins` core into the
 // dedicated `@better-auth/oauth-provider` package and was renamed
 // `oauthProvider`. It issues verifiable JWT access tokens + RFC7662
 // introspection (the whole point of spec-201).
 import { oauthProvider } from "@better-auth/oauth-provider";
 import type { OAuthOptions, SchemaClient, Scope } from "@better-auth/oauth-provider";
-import type { BetterAuthPlugin } from "better-auth";
+import { jwtVerify } from "jose";
 import { sql, type SQL } from "drizzle-orm";
 import { timingSafeEqual, createHash } from "node:crypto";
 
@@ -87,10 +90,12 @@ const OPENCLAW_CONNECTOR_CLIENT_ID = "openclaw-connector";
  * issued as a JWT whose `aud` includes it; the connector verifies offline via
  * JWKS (R5). MUST appear in `validAudiences` or the request is rejected.
  */
-export const OPENCLAW_CONNECTOR_AUDIENCE = "https://connector.holalumina.com/mcp";
+export const OPENCLAW_CONNECTOR_AUDIENCE = "https://connector.getglance.com/mcp";
+/** Back-compat alias for older contract names; same canonical getglance resource. */
+export const OPENCLAW_CONNECTOR_GETGLANCE_AUDIENCE = OPENCLAW_CONNECTOR_AUDIENCE;
 
 /** Issuer — matches Better Auth baseURL + OIDC discovery metadata (one `iss`). */
-export const OPENCLAW_IDP_ISSUER = "https://paperclip.holalumina.com";
+export const OPENCLAW_IDP_ISSUER = "https://agents.getglance.com";
 
 /** S2S gateway-token mint constants (ported verbatim from the 1.4 patch). */
 const GATEWAY_TOKEN_AUDIENCE = "lumina-gateway";
@@ -100,6 +105,10 @@ const MINT_RATE_LIMIT_MAX = 30;
 const MINT_RATE_LIMIT_BUCKET_CAP = 10_000;
 const MAX_TENANT_SLUG_LENGTH = 200;
 const TENANT_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/i;
+const OPENCLAW_DCR_MAX_CLIENTS_DEFAULT = 500;
+const OPENCLAW_DCR_ALERT_PER_HOUR_DEFAULT = 50;
+const AGENTS_SSO_AUDIENCE = "glance-agents-sso";
+const AGENTS_SSO_NONCE_PREFIX = "openclaw-agents-sso:";
 
 /**
  * Minimal structural type for the IdP config the fork passes through. Kept
@@ -113,9 +122,10 @@ export interface OpenclawIdpConfig {
 
 /**
  * A `db.execute`-capable handle (drizzle). The param is the drizzle `SQL` type the
- * overlay actually passes (every call is `db.execute(sql`...`)`); typing it that way
+ * overlay actually passes (every call is `db.execute(sql`…`)`); typing it that way
  * (not `unknown`) lets the fork's real `PostgresJsDatabase` satisfy this structural
- * type under strictFunctionTypes contravariance.
+ * type under strictFunctionTypes contravariance — `unknown` is too wide, so a
+ * `(string | SQLWrapper) => …` execute is otherwise not assignable to it.
  */
 type DbExecutor = {
   execute: (query: SQL) => Promise<unknown>;
@@ -238,6 +248,434 @@ export function getOpenclawTrustedClients(): OpenclawTrustedClient[] {
 }
 
 // ---------------------------------------------------------------------------
+// Anonymous DCR cumulative cap + volume signal (spec-199 WS3).
+//
+// @better-auth/oauth-provider@1.6.19 exposes config for DCR, anonymous DCR,
+// scope limits, client-secret TTL, and endpoint velocity limits, but no
+// documented pre-persist registration callback. Better Auth plugin before-hooks
+// are the clean owned seam: this overlay inserts a tiny guard plugin before the
+// oauth-provider plugin, so `/oauth2/register` is checked before oauth-provider
+// persists a new oauthClient row.
+//
+// The cap is intentionally cumulative over self-registered oauthClient rows:
+// reaching it is a fail-closed operator signal to prune junk rows or raise the
+// ceiling, not an active-client TTL window.
+// ---------------------------------------------------------------------------
+
+export interface DcrRegistrationLimits {
+  maxClients: number;
+  alertPerHour: number;
+}
+
+export interface DcrRegistrationCounts {
+  totalSelfRegistered: number;
+  recentSelfRegistered: number;
+}
+
+export function dcrClientMetadataRequestsConsentBypass(input: unknown): boolean {
+  if (input === null || typeof input !== "object") {
+    return false;
+  }
+  const record = input as Record<string, unknown>;
+  if ("skipConsent" in record || "skip_consent" in record) {
+    return true;
+  }
+  const metadata = record.metadata;
+  if (metadata && typeof metadata === "object") {
+    return dcrClientMetadataRequestsConsentBypass(metadata);
+  }
+  if (typeof metadata === "string" && metadata.trim().startsWith("{")) {
+    try {
+      return dcrClientMetadataRequestsConsentBypass(JSON.parse(metadata));
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function resolveDcrRegistrationLimits(): DcrRegistrationLimits {
+  return {
+    maxClients: parseNonNegativeIntEnv(
+      "OPENCLAW_DCR_MAX_CLIENTS",
+      OPENCLAW_DCR_MAX_CLIENTS_DEFAULT,
+    ),
+    alertPerHour: parseNonNegativeIntEnv(
+      "OPENCLAW_DCR_ALERT_PER_HOUR",
+      OPENCLAW_DCR_ALERT_PER_HOUR_DEFAULT,
+    ),
+  };
+}
+
+function numberFromCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function firstCount(result: unknown): number {
+  const row = extractRows(result)[0] as { count?: unknown } | undefined;
+  return numberFromCount(row?.count);
+}
+
+/**
+ * Count self-registered clients only. Seeded/trusted first-party clients are
+ * identified by stable client_id values and are intentionally excluded from
+ * both the cumulative cap and the hourly alert threshold.
+ */
+export async function getDcrRegistrationCounts(db: DbExecutor): Promise<DcrRegistrationCounts> {
+  const total = await db.execute(sql`
+    select count(*)::int as count
+      from "oauthClient"
+     where "clientId" not in (${OPENCLAW_ADMIN_CLIENT_ID}, ${OPENCLAW_CONNECTOR_CLIENT_ID})
+  `);
+  const recent = await db.execute(sql`
+    select count(*)::int as count
+      from "oauthClient"
+     where "clientId" not in (${OPENCLAW_ADMIN_CLIENT_ID}, ${OPENCLAW_CONNECTOR_CLIENT_ID})
+       and "createdAt" >= now() - interval '1 hour'
+  `);
+  return {
+    totalSelfRegistered: firstCount(total),
+    recentSelfRegistered: firstCount(recent),
+  };
+}
+
+function throwDcrCapExceeded(counts: DcrRegistrationCounts, limits: DcrRegistrationLimits): never {
+  throw new APIError("TOO_MANY_REQUESTS", {
+    error: "invalid_client_metadata",
+    error_description:
+      "dynamic client registration capacity exceeded; contact the service operator",
+    max_clients: limits.maxClients,
+    current_clients: counts.totalSelfRegistered,
+  });
+}
+
+function throwDcrConsentBypassRejected(): never {
+  throw new APIError("BAD_REQUEST", {
+    error: "invalid_client_metadata",
+    error_description: "dynamic clients cannot request consent bypass",
+  });
+}
+
+/**
+ * Enforce the cumulative DCR cap and emit a greppable warn-level volume signal.
+ * Called from the Better Auth before-hook before oauth-provider persists the
+ * client row. It intentionally logs only aggregate counts and env names.
+ */
+export async function assertDcrRegistrationBudget(
+  db: DbExecutor,
+  limits: DcrRegistrationLimits = resolveDcrRegistrationLimits(),
+): Promise<DcrRegistrationCounts> {
+  // Serialize concurrent register callers before counting. Better Auth already
+  // runs the registration path through the request-scoped adapter/transaction,
+  // so this advisory xact lock keeps the cap check aligned with the eventual
+  // oauthClient insert instead of racing on a plain count.
+  await db.execute(sql`
+    select pg_advisory_xact_lock(
+      hashtext('openclaw'),
+      hashtext('dcr:register')
+    )
+  `);
+  const counts = await getDcrRegistrationCounts(db);
+  if (counts.totalSelfRegistered >= limits.maxClients) {
+    throwDcrCapExceeded(counts, limits);
+  }
+
+  const projectedHourlyCount = counts.recentSelfRegistered + 1;
+  if (projectedHourlyCount > limits.alertPerHour) {
+    console.warn(
+      "[paperclip-idp] dcr.volume.alert " +
+        `recent_count=${projectedHourlyCount} threshold=${limits.alertPerHour} ` +
+        `total_count=${counts.totalSelfRegistered + 1} env=OPENCLAW_DCR_ALERT_PER_HOUR`,
+    );
+  }
+  return counts;
+}
+
+export function isDcrRegistrationPath(path: string | null | undefined): boolean {
+  const normalized = (path ?? "").split("?")[0]?.replace(/\/+$/u, "") || "/";
+  return normalized === "/oauth2/register" || normalized.endsWith("/oauth2/register");
+}
+
+export function dcrRegistrationGuardPlugin(db: DbExecutor): BetterAuthPlugin {
+  return {
+    id: "openclaw-dcr-registration-guard",
+    hooks: {
+      before: [
+        {
+          matcher: (context) => isDcrRegistrationPath(context.path),
+          handler: async (context) => {
+            if (dcrClientMetadataRequestsConsentBypass((context as { body?: unknown }).body)) {
+              throwDcrConsentBypassRejected();
+            }
+            await assertDcrRegistrationBudget(db);
+          },
+        },
+      ],
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agents SSO bridge.
+//
+// Platform app sessions (`__ba_session`) and Paperclip sessions are intentionally
+// different cookie/session contracts. The bridge accepts a 60-second HS256 token
+// minted by app.getglance.com, resolves the same Better Auth user inside
+// Paperclip, creates a native Paperclip Better Auth session, and lets Better Auth
+// set its own signed session cookie.
+// ---------------------------------------------------------------------------
+
+type AgentsSsoUser = {
+  id: string;
+  email?: string | null;
+  name?: string | null;
+};
+
+type AgentsSsoEndpointContext = {
+  query: { token?: unknown };
+  context: {
+    internalAdapter: {
+      findVerificationValue: (identifier: string) => Promise<unknown>;
+      createVerificationValue: (value: {
+        identifier: string;
+        value: string;
+        expiresAt: Date;
+      }) => Promise<unknown>;
+      findUserById: (id: string) => Promise<AgentsSsoUser | null>;
+      findUserByEmail: (email: string) => Promise<{ user?: AgentsSsoUser | null } | null>;
+      createSession: (userId: string) => Promise<{ token?: string } | null>;
+    };
+  };
+  json: (body: unknown, init?: { status?: number }) => unknown;
+  redirect: (url: string) => unknown;
+};
+
+export function expectedAgentsSsoIssuer(): string {
+  return (process.env.PLATFORM_APP_ORIGIN ?? "https://app.getglance.com").replace(/\/+$/, "");
+}
+
+export function agentsSsoSecret(): string {
+  return process.env.AGENTS_SSO_BRIDGE_SECRET?.trim() ?? "";
+}
+
+export function isSafeAgentsSsoReturnTo(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  if (value.includes(":") || value.includes("\\")) return false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return false;
+  }
+  return true;
+}
+
+type VerifiedAgentsSsoClaims = {
+  sub: string;
+  email: string;
+  jti: string;
+  returnTo: string;
+  exp: number;
+};
+
+export async function verifyAgentsSsoToken(token: string): Promise<VerifiedAgentsSsoClaims> {
+  const secret = agentsSsoSecret();
+  if (!secret) {
+    throw new APIError("INTERNAL_SERVER_ERROR", { body: { error: "agents_sso_not_configured" } });
+  }
+
+  const { payload } = await jwtVerify(token, new TextEncoder().encode(secret), {
+    issuer: expectedAgentsSsoIssuer(),
+    audience: AGENTS_SSO_AUDIENCE,
+    algorithms: ["HS256"],
+  });
+
+  if (
+    typeof payload.sub !== "string" ||
+    typeof payload.email !== "string" ||
+    typeof payload.jti !== "string" ||
+    typeof payload.exp !== "number" ||
+    !isSafeAgentsSsoReturnTo(payload.returnTo)
+  ) {
+    throw new APIError("UNAUTHORIZED", { body: { error: "invalid_agents_sso_claims" } });
+  }
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    jti: payload.jti,
+    returnTo: payload.returnTo,
+    exp: payload.exp,
+  };
+}
+
+async function consumeAgentsSsoNonce(
+  ctx: AgentsSsoEndpointContext,
+  claims: VerifiedAgentsSsoClaims,
+): Promise<boolean> {
+  const identifier = `${AGENTS_SSO_NONCE_PREFIX}${claims.jti}`;
+  const existing = await ctx.context.internalAdapter.findVerificationValue(identifier);
+  if (existing) return false;
+  try {
+    await ctx.context.internalAdapter.createVerificationValue({
+      identifier,
+      value: claims.sub,
+      expiresAt: new Date(claims.exp * 1000),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveAgentsSsoUser(
+  ctx: AgentsSsoEndpointContext,
+  claims: VerifiedAgentsSsoClaims,
+): Promise<AgentsSsoUser | null> {
+  const byId = await ctx.context.internalAdapter.findUserById(claims.sub);
+  if (byId?.id) {
+    if (byId.email && byId.email.toLowerCase() !== claims.email.toLowerCase()) {
+      return null;
+    }
+    return byId;
+  }
+  const byEmail = await ctx.context.internalAdapter.findUserByEmail(claims.email);
+  return byEmail?.user?.id ? byEmail.user : null;
+}
+
+export async function handleAgentsSsoConsume(ctx: AgentsSsoEndpointContext): Promise<unknown> {
+  const rawToken = ctx.query.token;
+  if (typeof rawToken !== "string" || rawToken.length === 0) {
+    return ctx.json({ error: "missing_agents_sso_token" }, { status: 400 });
+  }
+
+  let claims: VerifiedAgentsSsoClaims;
+  try {
+    claims = await verifyAgentsSsoToken(rawToken);
+  } catch (err) {
+    if (err instanceof APIError) throw err;
+    throw new APIError("UNAUTHORIZED", { body: { error: "invalid_agents_sso_token" } });
+  }
+
+  if (!(await consumeAgentsSsoNonce(ctx, claims))) {
+    throw new APIError("UNAUTHORIZED", { body: { error: "agents_sso_token_replayed" } });
+  }
+
+  const user = await resolveAgentsSsoUser(ctx, claims);
+  if (!user?.id) {
+    throw new APIError("FORBIDDEN", { body: { error: "agents_sso_user_not_found" } });
+  }
+
+  const session = await ctx.context.internalAdapter.createSession(user.id);
+  if (!session?.token) {
+    throw new APIError("INTERNAL_SERVER_ERROR", { body: { error: "agents_sso_session_failed" } });
+  }
+
+  await setSessionCookie(ctx as never, { session, user } as never, false, {
+    sameSite: "lax",
+  });
+  throw ctx.redirect(claims.returnTo);
+}
+
+export function agentsSsoBridgePlugin(): BetterAuthPlugin {
+  return {
+    id: "openclaw-agents-sso-bridge",
+    endpoints: {
+      openclawAgentsSsoConsume: createAuthEndpoint(
+        "/openclaw-sso/consume",
+        {
+          method: "GET",
+          requireHeaders: true,
+        },
+        async (ctx) => handleAgentsSsoConsume(ctx as unknown as AgentsSsoEndpointContext),
+      ),
+    },
+  } as unknown as BetterAuthPlugin;
+}
+
+type AgentsSsoRedirectRequest = {
+  path?: string;
+  originalUrl?: string;
+  method?: string;
+  accepts?: (types: string[]) => string | false | undefined;
+  actor?: { source?: string };
+};
+type AgentsSsoRedirectResponse = {
+  redirect: (status: number, url: string) => void;
+};
+type AgentsSsoRedirectMiddlewareOptions = {
+  resolveSession?: (req: AgentsSsoRedirectRequest) => Promise<unknown>;
+};
+
+function shouldRedirectAgentsHtmlRequest(req: AgentsSsoRedirectRequest): boolean {
+  const method = (req.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return false;
+  const path = req.path ?? "/";
+  if (
+    path.startsWith("/api/") ||
+    path.startsWith("/assets/") ||
+    path.startsWith("/openclaw-sso/") ||
+    path === "/health" ||
+    path === "/favicon.ico" ||
+    path === "/site.webmanifest"
+  ) {
+    return false;
+  }
+  return req.accepts?.(["html"]) === "html";
+}
+
+export function createOpenclawAgentsSsoRedirectMiddleware(opts: AgentsSsoRedirectMiddlewareOptions = {}) {
+  return async (
+    req: AgentsSsoRedirectRequest,
+    res: AgentsSsoRedirectResponse,
+    next: (err?: unknown) => void,
+  ) => {
+    if (!shouldRedirectAgentsHtmlRequest(req)) {
+      next();
+      return;
+    }
+    if (req.actor?.source === "session") {
+      next();
+      return;
+    }
+    if (opts.resolveSession) {
+      try {
+        if (await opts.resolveSession(req)) {
+          next();
+          return;
+        }
+      } catch (err) {
+        next(err);
+        return;
+      }
+    }
+    const platformOrigin = expectedAgentsSsoIssuer();
+    const returnTo = isSafeAgentsSsoReturnTo(req.originalUrl) ? req.originalUrl : "/";
+    const launch = new URL("/api/auth/agents/launch", platformOrigin);
+    launch.searchParams.set("returnTo", returnTo);
+    res.redirect(307, launch.toString());
+  };
+}
+
+// ---------------------------------------------------------------------------
 // org_id resolution (ported VERBATIM in semantics from the 1.4 patch).
 // ---------------------------------------------------------------------------
 
@@ -324,15 +762,23 @@ export function buildOauthProviderConfig(
     // userinfo audience are valid; anything else is rejected (no opaque
     // downgrade). Issuer baseURL is included so first-party /userinfo still works.
     validAudiences: [OPENCLAW_CONNECTOR_AUDIENCE, issuer],
+    allowDynamicClientRegistration: true,
+    allowUnauthenticatedClientRegistration: true,
+    rateLimit: {
+      register: { window: 60, max: 5 },
+    },
+    clientRegistrationClientSecretExpiration: "30d",
+    clientRegistrationAllowedScopes: ["openid", "profile", "email", "offline_access"],
     // 1.4→1.6: trusted clients are seeded as oauthClient rows; here we mark
     // their ids immutable/trusted so the CRUD endpoints can't mutate them and
     // they are cached per-request.
     cachedTrustedClients: new Set(trustedClients.map((client) => client.clientId)),
-    // Default = /oidc-login (server-rendered in app.js): the compiled SPA
-    // /login page does not follow the OAuth resume URL after sign-in,
-    // dead-ending the flow (1.4 live-E2E finding B6). Required option in 1.6.
+    // Default login = /oidc-login (server-rendered in app.js): the compiled SPA
+    // /login page does not follow the OAuth resume URL after sign-in. Dynamic
+    // DCR clients then need a distinct consent page; pointing consentPage back
+    // at login causes a post-login loop for non-trusted clients.
     loginPage: process.env.OPENCLAW_OIDC_LOGIN_PAGE ?? "/oidc-login",
-    consentPage: process.env.OPENCLAW_OIDC_CONSENT_PAGE ?? "/oidc-login",
+    consentPage: process.env.OPENCLAW_OIDC_CONSENT_PAGE ?? "/oidc-consent",
     // 1.4→1.6: org_id now injected via customAccessTokenClaims (into the JWT
     // body AND the introspection response) instead of the 1.4
     // getAdditionalUserInfoClaim (userinfo-only). `resource` is the requested
@@ -354,25 +800,110 @@ export function buildOauthProviderConfig(
   };
 }
 
+// ---------------------------------------------------------------------------
+// JWKS first-boot mint guard (codex-gate spec-202 HIGH-1).
+//
+// The jwt plugin mints a fresh Ed25519 signing key LAZILY on the first
+// /jwks (or sign) call if the `jwks` table is empty. On a partial or bad
+// cutover (e.g. the 1.4→1.6 migration didn't run, or ran against the wrong
+// store) that silent mint rotates the signing key — breaking every already
+// issued token AND claude.ai's cached JWKS. This is the exact failure that
+// forced the 2026-06-19 rollback.
+//
+// In prod (REQUIRE_PRESEEDED_JWKS=true) we PREFLIGHT the `jwks` table BEFORE
+// the plugin set is constructed (i.e. before anything can trigger a lazy
+// mint) and FAIL CLOSED if the preserved key is absent. Dev/clean boots leave
+// REQUIRE_PRESEEDED_JWKS unset/false and keep the stock lazy-mint behavior.
+// Reuses the overlay's existing `db.execute(sql\`…\`)` mechanism (no new pg dep).
+//
+// Runtime note: the compiled adapter maps the better-auth `jwks` model onto the
+// `auth_jwks` table (see the patch). This TS mirror keeps `jwks` for readability;
+// the authoritative query is in @paperclipai+server+2026.609.0.patch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fail-closed preflight: assert the `jwks` table already holds the preserved
+ * signing key BEFORE any plugin can lazily mint a fresh one. No-op unless
+ * `REQUIRE_PRESEEDED_JWKS=true`. When `EXPECTED_SIGNING_KID` is set, the
+ * preserved key MUST match that kid; otherwise any single pre-seeded key
+ * suffices. Throws (aborting boot) when the expectation is unmet — never
+ * allows the IdP to come up and rotate the key.
+ */
+export async function assertPreseededJwks(db: DbExecutor): Promise<void> {
+  if ((process.env.REQUIRE_PRESEEDED_JWKS ?? "").trim().toLowerCase() !== "true") {
+    return; // dev / clean boot — preserve stock lazy-mint behavior.
+  }
+  const expectedKid = (process.env.EXPECTED_SIGNING_KID ?? "").trim();
+  // Order by created_at desc: the better-auth jwt plugin signs with the
+  // LATEST-created key (getJwksAdapter.getLatestKey) and lazily MINTS a fresh
+  // one when the latest key is missing OR filtered out as expired. So ONLY the
+  // latest row decides the signing kid — "expected kid present anywhere" is
+  // insufficient (a newer wrong key, or an expired latest key, shadows the
+  // preserved one and still triggers a rotation).
+  const result = await db.execute(sql`select id, expires_at from jwks order by created_at desc`);
+  const rows = extractRows(result).filter(
+    (row): row is { id: string; expires_at?: unknown } =>
+      typeof (row as { id?: unknown })?.id === "string" &&
+      (row as { id: string }).id.length > 0,
+  );
+  const latest = rows[0];
+  if (!latest) {
+    throw new Error(
+      "[paperclip-idp] REQUIRE_PRESEEDED_JWKS=true but the jwks table is EMPTY. " +
+        "Refusing to boot — the jwt plugin would mint a NEW signing key and rotate " +
+        "the kid, breaking every issued token + claude.ai's cached JWKS. Run the " +
+        "1.4→1.6 migration (infra/paperclip/migrate-idp-1.4-to-1.6.mjs) to seed the " +
+        "preserved key before boot (spec-202 cutover §4).",
+    );
+  }
+  const latestExpiry =
+    latest.expires_at == null ? null : new Date(latest.expires_at as string).getTime();
+  if (latestExpiry !== null && Number.isFinite(latestExpiry) && latestExpiry <= Date.now()) {
+    throw new Error(
+      `[paperclip-idp] REQUIRE_PRESEEDED_JWKS=true but the latest jwks key (${latest.id}) is EXPIRED ` +
+        `(expires_at=${String(latest.expires_at)}). Refusing to boot — the jwt plugin would filter it out and ` +
+        "mint a NEW signing key, rotating the kid. Re-seed a non-expired preserved key before boot (spec-202 cutover §4).",
+    );
+  }
+  if (expectedKid && latest.id !== expectedKid) {
+    throw new Error(
+      `[paperclip-idp] REQUIRE_PRESEEDED_JWKS=true and EXPECTED_SIGNING_KID=${expectedKid} ` +
+        `but the LATEST jwks key is ${latest.id} (the jwt plugin signs with the latest-created key). Refusing to boot — ` +
+        "the preserved key is not the one that will sign (wrong/partial cutover or a stray re-mint left a newer key). " +
+        "Re-run the 1.4→1.6 migration against the correct store and remove any newer keys before boot (spec-202 cutover §4).",
+    );
+  }
+}
+
 /**
  * THE injected plugin set. Hook into upstream `createBetterAuthInstance` with:
  *
  *     plugins: [...openclawIdpPlugins(config)]
  *
- * Returns `[ jwt(), oauthProvider(...) ]` (C-IDP-4). PKCE/S256/skipConsent are
- * carried by the seeded trusted-client rows (1.6 per-client model). The
- * EdDSA-signed JWT (jwt plugin) is what the connector verifies offline (R5).
+ * Returns DCR guard + agents SSO bridge + `[ jwt(), magicLink(), oauthProvider(...) ]`
+ * (C-IDP-4). PKCE/S256/skipConsent are carried by the seeded trusted-client rows
+ * (1.6 per-client model). The EdDSA-signed JWT (jwt plugin) is what the connector
+ * verifies offline (R5).
  */
 export function openclawIdpPlugins(
   config: OpenclawIdpConfig,
   db: DbExecutor,
 ): BetterAuthPlugin[] {
   return [
+    dcrRegistrationGuardPlugin(db),
+    agentsSsoBridgePlugin(),
     // EdDSA/Ed25519 by default; JWKS served at <basePath>/jwks. Signing key
     // MUST be preserved across cutover (kid stability — C-IDP-5).
     jwt({ jwt: { issuer: config.baseUrl ?? OPENCLAW_IDP_ISSUER } }) as unknown as BetterAuthPlugin,
-    // The config's scopes are typed as a supported-scopes subset; oauthProvider's
-    // scope generic is invariant because scopes also appear in callback params.
+    magicLink({
+      sendMagicLink: async ({ email, url }) => {
+        await sendMagicLinkEmail({ email, magicUrl: url });
+      },
+    }) as unknown as BetterAuthPlugin,
+    // The config's scopes are typed `InternallySupportedScopes[]` (a subset of
+    // better-auth's `Scope`, which also includes ""); the oauthProvider scope generic
+    // is invariant (scopes appear in a `shouldRedirect` callback param), so cast the
+    // arg to oauthProvider's exact param type. Runtime config is valid for any Scope.
     oauthProvider(
       buildOauthProviderConfig(config, db) as Parameters<typeof oauthProvider>[0],
     ) as unknown as BetterAuthPlugin,
@@ -422,18 +953,202 @@ export async function seedOpenclawTrustedClients(db: DbExecutor): Promise<void> 
 }
 
 // ---------------------------------------------------------------------------
-// Password-reset redaction (ported verbatim from the 1.4 patch).
+// Hosted auth email delivery.
 //
-// SECURITY: the reset URL is a bearer secret — logging it shipped
-// account-takeover tokens into server logs. We log a NON-secret event only.
-// Wire a real mailer here to restore self-serve delivery. Pass this into the
+// SECURITY: magic and reset URLs are bearer secrets. Deliver them to Resend and
+// log only redacted URL metadata. Pass `sendResetPasswordRedacted` into the
 // fork's `emailAndPassword.sendResetPassword`.
 // ---------------------------------------------------------------------------
 
-export async function sendResetPasswordRedacted(args: { user: { email: string } }): Promise<void> {
+type ResetPasswordArgs = {
+  user: { email: string };
+  url?: string;
+};
+
+type ResendSendResult = {
+  id?: string;
+  error?: { message?: string };
+};
+
+function authEmailFromAddress(): string {
+  return (
+    process.env.OPENCLAW_IDP_RESEND_FROM ??
+    process.env.RESEND_FROM_EMAIL ??
+    "Glance <noreply@getglance.com>"
+  );
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function resetPasswordHtml(resetUrl: string): string {
+  const safeUrl = escapeHtml(resetUrl);
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    '<body style="font-family:Arial,sans-serif;background:#f7f8fb;margin:0;padding:32px;">',
+    '<main style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;padding:32px;">',
+    '<p style="color:#0d9488;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">Password Recovery</p>',
+    '<h1 style="color:#111827;font-size:24px;line-height:1.25;margin:0 0 16px;">Reset your Glance password</h1>',
+    '<p style="color:#374151;font-size:15px;line-height:1.6;">Use the secure link below to choose a new password.</p>',
+    `<p><a href="${safeUrl}" style="display:inline-block;background:#14b8a6;color:#fff;padding:14px 20px;border-radius:6px;text-decoration:none;font-weight:700;">Reset Password</a></p>`,
+    '<p style="color:#6b7280;font-size:13px;line-height:1.6;">If you did not request this password reset, you can safely ignore this email.</p>',
+    '<p style="color:#6b7280;font-size:12px;line-height:1.6;">For help, contact hello@getglance.com.</p>',
+    "</main>",
+    "</body>",
+    "</html>",
+  ].join("");
+}
+
+function resetPasswordText(resetUrl: string): string {
+  return [
+    "Reset your Glance password",
+    "",
+    "Use the secure link below to choose a new password.",
+    resetUrl,
+    "",
+    "If you did not request this password reset, you can safely ignore this email.",
+    "For help, contact hello@getglance.com.",
+  ].join("\n");
+}
+
+function magicLinkHtml(magicUrl: string): string {
+  const safeUrl = escapeHtml(magicUrl);
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    '<body style="font-family:Arial,sans-serif;background:#f7f8fb;margin:0;padding:32px;">',
+    '<main style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;padding:32px;">',
+    '<p style="color:#0d9488;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">Workspace Access</p>',
+    '<h1 style="color:#111827;font-size:24px;line-height:1.25;margin:0 0 16px;">Access your Glance workspace</h1>',
+    '<p style="color:#374151;font-size:15px;line-height:1.6;">Use the secure link below to continue to your workspace.</p>',
+    `<p><a href="${safeUrl}" style="display:inline-block;background:#14b8a6;color:#fff;padding:14px 20px;border-radius:6px;text-decoration:none;font-weight:700;">Access Workspace</a></p>`,
+    '<p style="color:#6b7280;font-size:13px;line-height:1.6;">If you did not request this link, you can safely ignore this email.</p>',
+    "</main>",
+    "</body>",
+    "</html>",
+  ].join("");
+}
+
+function magicLinkText(magicUrl: string): string {
+  return [
+    "Access your Glance workspace",
+    "",
+    "Use the secure link below to continue to your workspace.",
+    magicUrl,
+    "",
+    "If you did not request this link, you can safely ignore this email.",
+  ].join("\n");
+}
+
+function redactResetPasswordUrl(authUrl: string | undefined): string {
+  if (!authUrl) return "missing";
+  try {
+    const url = new URL(authUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      url.searchParams.set(key, "[redacted]");
+    }
+    if (url.hash) url.hash = "[redacted]";
+    return url.toString();
+  } catch {
+    return "[redacted-url]";
+  }
+}
+
+export async function sendResetPasswordEmail(args: {
+  email: string;
+  resetUrl: string;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    throw new Error("RESEND_API_KEY is required for IdP password reset delivery");
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: authEmailFromAddress(),
+      to: args.email,
+      subject: "Reset your Glance password",
+      html: resetPasswordHtml(args.resetUrl),
+      text: resetPasswordText(args.resetUrl),
+      tags: [
+        { name: "source", value: "paperclip_idp" },
+        { name: "kind", value: "password_reset" },
+      ],
+    }),
+  });
+
+  const result = (await response.json().catch(() => ({}))) as ResendSendResult;
+  if (!response.ok || result.error) {
+    throw new Error(result.error?.message ?? `Resend password reset send failed: ${response.status}`);
+  }
+
+  console.info(
+    `[paperclip-idp] password reset email queued for ${args.email} ` +
+      `(message_id=${result.id ?? "unknown"}; reset_url=${redactResetPasswordUrl(args.resetUrl)})`,
+  );
+}
+
+export async function sendMagicLinkEmail(args: {
+  email: string;
+  magicUrl: string;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    throw new Error("RESEND_API_KEY is required for IdP magic link delivery");
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: authEmailFromAddress(),
+      to: args.email,
+      subject: "Access your Glance workspace",
+      html: magicLinkHtml(args.magicUrl),
+      text: magicLinkText(args.magicUrl),
+      tags: [
+        { name: "source", value: "paperclip_idp" },
+        { name: "kind", value: "magic_link" },
+      ],
+    }),
+  });
+
+  const result = (await response.json().catch(() => ({}))) as ResendSendResult;
+  if (!response.ok || result.error) {
+    throw new Error(result.error?.message ?? `Resend magic link send failed: ${response.status}`);
+  }
+
+  console.info(
+    `[paperclip-idp] magic link email queued for ${args.email} ` +
+      `(message_id=${result.id ?? "unknown"}; magic_url=${redactResetPasswordUrl(args.magicUrl)})`,
+  );
+}
+
+export async function sendResetPasswordRedacted(args: ResetPasswordArgs): Promise<void> {
+  if (!args.url) {
+    throw new Error("Better Auth password reset callback did not provide a reset URL");
+  }
+  await sendResetPasswordEmail({
+    email: args.user.email,
+    resetUrl: args.url,
+  });
   console.info(
     `[paperclip-idp] password reset requested for ${args.user.email} ` +
-      `(reset link withheld from logs; deliver via admin tooling)`,
+      "(reset link withheld from logs)",
   );
 }
 

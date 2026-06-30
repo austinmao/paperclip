@@ -44,9 +44,10 @@ import { pgTable, text, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
 
 /**
  * A `db.execute`-capable handle (drizzle). The param is the drizzle `SQL` type the
- * overlay actually passes (every call is `db.execute(sql`...`)`); typing it that way
+ * overlay actually passes (every call is `db.execute(sql`…`)`); typing it that way
  * (not `unknown`) lets the fork's real `PostgresJsDatabase` satisfy this structural
- * type under strictFunctionTypes contravariance.
+ * type under strictFunctionTypes contravariance — `unknown` is too wide, so a
+ * `(string | SQLWrapper) => …` execute is otherwise not assignable to it.
  */
 type DbExecutor = {
   execute: (query: SQL) => Promise<unknown>;

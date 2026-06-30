@@ -52,7 +52,15 @@ import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { renderOidcLoginPage } from "./auth/oidc-login-page.js";
-import { OPENCLAW_IDP_ISSUER } from "./auth/openclaw-idp.js";
+import { renderOidcConsentPage } from "./auth/oidc-consent-page.js";
+import {
+  createOpenclawAgentsSsoRedirectMiddleware,
+  OPENCLAW_IDP_ISSUER,
+} from "./auth/openclaw-idp.js";
+import {
+  createOpenclawBrandInterviewActionProxy,
+  createOpenclawBrandPreviewProxy,
+} from "./auth/brand-preview-proxy.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
@@ -114,6 +122,7 @@ function buildOpenIdConfiguration(issuer: string) {
     token_endpoint: `${issuer}/api/auth/oauth2/token`,
     userinfo_endpoint: `${issuer}/api/auth/oauth2/userinfo`,
     jwks_uri: `${issuer}/api/auth/jwks`,
+    registration_endpoint: `${issuer}/api/auth/oauth2/register`,
     introspection_endpoint: `${issuer}/api/auth/oauth2/introspect`,
     revocation_endpoint: `${issuer}/api/auth/oauth2/revoke`,
     response_types_supported: ["code"],
@@ -234,9 +243,27 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  if (opts.betterAuthHandler) {
+    const resolveAgentsSession = opts.resolveSession;
+    app.use(
+      createOpenclawAgentsSsoRedirectMiddleware({
+        resolveSession: resolveAgentsSession
+          ? (req) => resolveAgentsSession(req as ExpressRequest)
+          : undefined,
+      }),
+    );
+  }
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.get("/.well-known/openid-configuration", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOpenIdConfiguration(issuer));
+    });
+    app.get("/.well-known/oauth-authorization-server", (_req, res) => {
       const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
       res
         .status(200)
@@ -253,8 +280,35 @@ export async function createApp(
       .set("Cache-Control", "no-cache")
       .send(renderOidcLoginPage());
   });
+  app.get("/oidc-consent", (_req, res) => {
+    res
+      .status(200)
+      .type("html")
+      .set("Cache-Control", "no-cache")
+      .send(renderOidcConsentPage());
+  });
   if (opts.gatewayTokenMintHandler) {
     app.post("/internal/gateway-token", opts.gatewayTokenMintHandler);
+    const brandProxyOptions = {
+      resolveSession: opts.resolveSession,
+      gatewayTokenMintHandler: opts.gatewayTokenMintHandler,
+    };
+    app.post(
+      "/:companyPrefix/clawinterview/:action",
+      createOpenclawBrandInterviewActionProxy(db, brandProxyOptions),
+    );
+    app.get(
+      "/:companyPrefix/clawinterview/brand-preview/:runId",
+      createOpenclawBrandPreviewProxy(db, brandProxyOptions),
+    );
+    app.get(
+      "/:companyPrefix/clawinterview/brand-preview/:runId/state",
+      createOpenclawBrandPreviewProxy(db, brandProxyOptions),
+    );
+    app.get(
+      "/:companyPrefix/clawinterview/brand-preview-assets/:runId/:role",
+      createOpenclawBrandPreviewProxy(db, brandProxyOptions),
+    );
   }
   app.use(llmRoutes(db));
 
