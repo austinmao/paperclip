@@ -85,7 +85,7 @@ async function submitConsent(accept){
       method:"POST",
       headers:{"content-type":"application/json","accept":"application/json"},
       credentials:"include",
-      body:JSON.stringify({accept})
+      body:JSON.stringify({accept,oauth_query:window.location.search.slice(1)})
     });
     const data=await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data?.message||data?.error_description||data?.error||"Unable to record consent.");
