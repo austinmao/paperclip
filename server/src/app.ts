@@ -252,6 +252,7 @@ export async function createApp(
           : undefined,
       }),
     );
+    app.all("/api/auth/openclaw-sso/consume", opts.betterAuthHandler);
   }
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
