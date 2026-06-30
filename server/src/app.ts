@@ -290,6 +290,30 @@ export async function createApp(
         .set("Cache-Control", "no-store")
         .send(buildOAuthProtectedResourceMetadata(issuer));
     });
+    app.get("/api/auth/.well-known/openid-configuration", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOpenIdConfiguration(issuer));
+    });
+    app.get("/api/auth/.well-known/oauth-authorization-server", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOpenIdConfiguration(issuer));
+    });
+    app.get("/api/auth/.well-known/oauth-protected-resource", (_req, res) => {
+      const issuer = normalizeIssuerUrl(process.env.PAPERCLIP_PUBLIC_URL);
+      res
+        .status(200)
+        .type("application/json")
+        .set("Cache-Control", "no-store")
+        .send(buildOAuthProtectedResourceMetadata(issuer));
+    });
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
   app.get("/oidc-login", (_req, res) => {
