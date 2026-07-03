@@ -7,7 +7,6 @@ import type { Db } from "@paperclipai/db";
 import {
   authAccounts,
   authSessions,
-  authUsers,
   authVerifications,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
@@ -145,7 +144,6 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {
-        user: authUsers,
         session: authSessions,
         account: authAccounts,
         verification: authVerifications,
