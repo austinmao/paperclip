@@ -314,6 +314,28 @@ export async function createApp(
         .set("Cache-Control", "no-store")
         .send(buildOAuthProtectedResourceMetadata(issuer));
     });
+    // spec-292 track-b-707-idp-rebase gate-1 finding: on the rebased
+    // better-auth@1.6.20 + @better-auth/oauth-provider@1.6.20 pairing, the
+    // oauth-provider DCR endpoint's `ctx.json(body, { status: 201, ... })`
+    // (RFC 7591-mandated Created status) is observed arriving at the client
+    // as HTTP 200 by the time better-auth's endpoint dispatch reaches
+    // better-call's node adapter — the JSON body itself is unaffected and
+    // fully RFC-7591-shaped (client_id/client_id_issued_at/etc). Root cause
+    // lives inside vendored better-auth core's endpoint/hook composition, not
+    // in this overlay's own source, so it is corrected here at the Express
+    // boundary rather than by patching vendored code. Scoped to exactly the
+    // DCR register success path; error responses (400/429) are untouched.
+    app.post("/api/auth/oauth2/register", (_req, res, next) => {
+      const originalWriteHead = res.writeHead.bind(res);
+      res.writeHead = ((statusCode: number, ...rest: unknown[]) => {
+        const corrected = statusCode === 200 ? 201 : statusCode;
+        return (originalWriteHead as (...args: unknown[]) => ReturnType<typeof res.writeHead>)(
+          corrected,
+          ...rest,
+        );
+      }) as typeof res.writeHead;
+      next();
+    });
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
   app.get("/oidc-login", (_req, res) => {
