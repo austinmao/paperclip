@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Layout } from "./components/Layout";
 import {
   NoCompaniesStartPage,
+  UNPREFIXED_DASHBOARD_ROUTE,
   UnprefixedBoardRedirect,
 } from "./components/UnprefixedBoardRedirect";
 import { ConferenceRoomChatGate } from "./components/ConferenceRoomChatGate";
@@ -354,7 +355,7 @@ export function App() {
         <Route element={<CloudAccessGate />}>
           <Route index element={<CompanyRootRedirect />} />
           <Route path="onboarding" element={<OnboardingRoutePage />} />
-          <Route path="dashboard/*" element={<UnprefixedBoardRedirect />} />
+          <Route path={UNPREFIXED_DASHBOARD_ROUTE} element={<UnprefixedBoardRedirect />} />
           <Route path="instance" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings/*" element={<LegacySettingsRedirect />} />

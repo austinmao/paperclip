@@ -1,9 +1,11 @@
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
-import { Navigate, useLocation } from "@/lib/router";
+import { Navigate, useLocation } from "react-router-dom";
 import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
 import { shouldRedirectCompanylessRouteToOnboarding } from "../lib/onboarding-route";
+
+export const UNPREFIXED_DASHBOARD_ROUTE = "dashboard/*";
 
 export function UnprefixedBoardRedirect() {
   const location = useLocation();
