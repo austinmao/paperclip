@@ -166,6 +166,9 @@ export function createBetterAuthInstance(
     authPublicBaseUrl: config.authPublicBaseUrl,
     publicUrl,
   });
+  const idpSchemaWithOptionalUser = idpAuthSchema as typeof idpAuthSchema & {
+    user?: typeof authUsers;
+  };
 
   const authConfig = {
     baseURL: baseUrl,
@@ -174,13 +177,13 @@ export function createBetterAuthInstance(
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {
-        user: authUsers,
         session: authSessions,
         account: authAccounts,
         verification: authVerifications,
         // spec-201: IdP-only tables (jwks + oauth-provider) so the jwt +
         // oauthProvider plugins resolve their models against the explicit schema.
-        ...idpAuthSchema,
+        ...idpSchemaWithOptionalUser,
+        user: idpSchemaWithOptionalUser.user ?? authUsers,
       },
     }),
     emailAndPassword: buildBetterAuthEmailAndPasswordOptions(config),
