@@ -633,6 +633,8 @@ function shouldRedirectAgentsHtmlRequest(req: AgentsSsoRedirectRequest): boolean
     path.startsWith("/assets/") ||
     path.startsWith("/.well-known/") ||
     path.startsWith("/openclaw-sso/") ||
+    path === "/oidc-login" ||
+    path === "/oidc-consent" ||
     path === "/health" ||
     path === "/favicon.ico" ||
     path === "/site.webmanifest"
